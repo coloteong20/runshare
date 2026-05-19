@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <title>RunShare — Live Run</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Run header -->
+  <header class="run-header">
+    <a class="back-link" href="index.html" title="Back to create">←</a>
+    <div class="run-info">
+      <div class="run-title" id="sessionTitle">Loading…</div>
+      <div class="run-meta" id="sessionMeta"></div>
+    </div>
+    <button id="joinBtn" onclick="showJoinModal()">+ Join Run</button>
+    <button id="endRunBtn" onclick="endRun()" style="display:none;background:var(--red);color:white;border:none;border-radius:var(--r-sm);padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">End Run</button>
+  </header>
+
+  <!-- Map -->
+  <div id="map"></div>
+
+  <!-- Follow-me toggle -->
+  <button class="center-btn" id="centerBtn" onclick="toggleFollow()" title="Follow my position">
+    📍
+  </button>
+
+  <!-- Live participants bar -->
+  <div class="participants-bar">
+    <div class="participants-label">
+      <span>Runners</span>
+      <span id="activeCount"></span>
+    </div>
+    <div class="participants-chips" id="participantChips">
+      <span style="color:var(--muted);font-size:13px">Loading…</span>
+    </div>
+  </div>
+
+  <!-- Join modal -->
+  <div class="modal-overlay" id="joinModal" style="display:none">
+    <div class="join-box">
+      <h2>Join the Run 🏃</h2>
+      <p>Enter your name so your friends can see you on the map. Your location will be shared with everyone in this session.</p>
+      <div class="join-form">
+        <input type="text" id="joinName" placeholder="Your name (e.g. Alice)" maxlength="30" onkeydown="handleJoinKey(event)" oninput="document.getElementById('nameError').style.display='none'">
+        <span id="nameError" style="display:none;color:var(--red);font-size:13px">That name is already taken — pick another</span>
+        <div id="passwordRow" style="display:none;flex-direction:column;gap:6px">
+          <input type="password" id="joinPassword" placeholder="Run password" maxlength="30" onkeydown="handleJoinKey(event)">
+          <span id="passwordError" style="display:none;color:var(--red);font-size:13px">Incorrect password — try again</span>
+        </div>
+        <button class="btn btn-primary" onclick="submitJoin()">Start Sharing Location</button>
+        <button class="btn btn-ghost" onclick="hideJoinModal()">Maybe later</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Run ended overlay -->
+  <div id="endedOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);
+    z-index:500;flex-direction:column;align-items:center;justify-content:center;
+    color:white;font-family:Inter,sans-serif;text-align:center;gap:12px;padding:24px;">
+    <div style="font-size:52px">🏁</div>
+    <h2 style="font-size:24px;margin:0">Run Ended</h2>
+    <p style="color:rgba(255,255,255,.7);margin:0">The organiser has ended this session.</p>
+    <a href="/" style="margin-top:8px;background:#FF6B35;color:white;padding:12px 24px;
+      border-radius:8px;text-decoration:none;font-weight:600;">Back to Home</a>
+  </div>
+
+  <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
+  <script src="config.js"></script>
+  <script src="run.js"></script>
+</body>
+</html>

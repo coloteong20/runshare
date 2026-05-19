@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <title>RunShare — Plan &amp; Run Together</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet">
+  <link href="https://api.mapbox.com/mapbox-gl-js/plugins/mapbox-gl-geocoder/v5.0.0/mapbox-gl-geocoder.css" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="header">
+    <div class="logo">Run<span>Share</span></div>
+    <button class="btn btn-ghost btn-sm" onclick="toggleHistory()">My Runs</button>
+  </header>
+
+  <!-- Map (full screen, behind everything) -->
+  <div id="map"></div>
+
+  <!-- Bottom create panel -->
+  <div class="bottom-panel">
+    <div class="panel-handle"></div>
+
+    <div class="instruction">
+      <div class="step-badge">1</div>
+      <span id="instruction">Click the map to add your starting point</span>
+    </div>
+
+    <!-- Route stats (hidden until ≥1 waypoint) -->
+    <div class="route-stats" id="routeStats" style="display:none">
+      <div class="stat-block">
+        <span class="stat-value" id="distanceVal">0.0</span>
+        <span class="stat-label">km</span>
+      </div>
+      <div class="stat-block">
+        <span class="stat-value" id="waypointCount">0</span>
+        <span class="stat-label">points</span>
+      </div>
+      <div class="route-actions">
+        <button class="btn btn-ghost btn-sm" onclick="closeLoop()" title="Connect end back to start">↩ Loop</button>
+        <button class="btn btn-red btn-sm" onclick="clearRoute()">✕ Clear</button>
+      </div>
+    </div>
+
+    <!-- Create form (hidden until ≥2 waypoints) -->
+    <div class="create-form" id="createForm" style="display:none">
+      <input type="text" id="sessionName" placeholder="Name this run  (e.g. Saturday Marina Loop)" maxlength="60">
+      <input type="text" id="sessionPassword" placeholder="Password (optional — leave blank for open run)" maxlength="30">
+      <button class="btn btn-primary" id="createBtn" onclick="createSession()">
+        Create Run &amp; Get Link →
+      </button>
+    </div>
+  </div>
+
+  <!-- History side panel -->
+  <div class="history-panel" id="historyPanel">
+    <div class="history-header">
+      <span>My Runs</span>
+      <button class="btn btn-ghost btn-sm" onclick="toggleHistory()">✕ Close</button>
+    </div>
+    <div class="history-list" id="historyList"></div>
+  </div>
+
+  <!-- Share modal -->
+  <div class="modal-overlay" id="shareModal" style="display:none">
+    <div class="modal">
+      <h2>Run Created! 🎉</h2>
+      <p>Share this link with your running crew. Everyone who opens it can see the route and share their live location.</p>
+      <div class="share-link-box">
+        <input type="text" id="shareLink" readonly>
+        <button class="btn btn-primary" id="copyBtn" onclick="copyLink()">Copy</button>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="closeModal()">Close</button>
+        <button class="btn btn-primary" onclick="goToRun()">Open Run →</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" style="position:fixed;bottom:160px;left:50%;transform:translateX(-50%);
+    background:#1A1A2E;color:white;padding:10px 18px;border-radius:8px;font-size:13px;
+    z-index:400;opacity:0;transition:opacity .3s;pointer-events:none;white-space:nowrap;"></div>
+
+  <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+  <script src="https://api.mapbox.com/mapbox-gl-js/plugins/mapbox-gl-geocoder/v5.0.0/mapbox-gl-geocoder.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
+  <script src="config.js"></script>
+  <script src="create.js"></script>
+</body>
+</html>
