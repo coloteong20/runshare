@@ -32,6 +32,7 @@ let smoothedPace     = null; // min/km, exponential moving average
 let ghostMarkers     = {};   // estimated position markers for stale participants
 
 const STALE_MS = 30_000;    // 30s without update = stale
+const START_RADIUS_M = 50;  // within 50m of start = not started
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
 
@@ -252,15 +253,19 @@ function renderParticipantBar(all, now) {
     const color  = participantColors[id] || '#999';
     const isMe   = id === userId;
 
-    const remaining = (active && p.lat && p.lng) ? getRemainingDistance(p.lat, p.lng) : null;
-    const etaStr    = formatETA(remaining, p.pace ?? null);
-    const paceStr   = p.pace ? formatPace(p.pace) : null;
+    const remaining   = (active && p.lat && p.lng) ? getRemainingDistance(p.lat, p.lng) : null;
+    const notStarted  = (active && p.lat && p.lng && routeCoords.length > 0)
+      ? haversineKm(p.lat, p.lng, routeCoords[0][1], routeCoords[0][0]) * 1000 < START_RADIUS_M
+      : false;
+    const etaStr    = notStarted ? null : formatETA(remaining, p.pace ?? null);
+    const paceStr   = notStarted ? null : (p.pace ? formatPace(p.pace) : null);
 
     const age   = now - (p.lastSeen || 0);
     const stale = active && age > STALE_MS;
 
     const metaParts = [];
-    if (remaining !== null) metaParts.push(`${remaining.toFixed(1)} km left`);
+    if (notStarted)         metaParts.push('Not started');
+    else if (remaining !== null) metaParts.push(`${remaining.toFixed(1)} km left`);
     if (etaStr)             metaParts.push(etaStr);
     if (paceStr)            metaParts.push(paceStr);
 
