@@ -18,14 +18,20 @@ let userId = sessionStorage.getItem('rs_uid') || (() => {
 
 let map;
 let sessionId;
-let sessionPassword = null;
-let isCreator       = false;
-let watchId         = null;
-let isJoined        = false;
-let followMe        = false;
-let colorIndex      = 0;
+let sessionPassword  = null;
+let isCreator        = false;
+let watchId          = null;
+let isJoined         = false;
+let followMe         = false;
+let colorIndex       = 0;
 let participantColors  = {};
 let participantMarkers = {};
+let routeCoords      = [];   // full route [[lng,lat], ...]
+let lastPushLocation = null; // for pace calculation
+let smoothedPace     = null; // min/km, exponential moving average
+let ghostMarkers     = {};   // estimated position markers for stale participants
+
+const STALE_MS = 30_000;    // 30s without update = stale
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
 
@@ -42,6 +48,7 @@ async function init() {
     console.log('[RunShare] Snapshot exists:', snap.exists(), '| val:', snap.val());
     if (!snap.exists()) return showError('Session not found — the link may be invalid.');
     session = snap.val();
+    routeCoords = session.route || [];
   } catch (err) {
     console.error('[RunShare] Firebase read error:', err);
     return showError('Could not connect to database: ' + err.message);
@@ -150,15 +157,19 @@ function onParticipantsSnapshot(snapshot) {
   // Update / create markers
   Object.entries(all).forEach(([id, p]) => {
     if (!p.lat || !p.lng) return;
-    const isMe    = id === userId;
-    const active  = now - (p.lastSeen || 0) < 120_000;
-    const color   = participantColors[id];
+    const isMe   = id === userId;
+    const age    = now - (p.lastSeen || 0);
+    const active = age < 120_000;
+    const stale  = age > STALE_MS;
+    const color  = participantColors[id];
 
+    // Real marker — faded when stale
+    const opacity = !active ? '0.3' : stale ? '0.5' : '1';
     if (participantMarkers[id]) {
       participantMarkers[id].setLngLat([p.lng, p.lat]);
-      participantMarkers[id].getElement().style.opacity = active ? '1' : '0.4';
+      participantMarkers[id].getElement().style.opacity = opacity;
     } else {
-      const el     = makeRunnerEl(p.name, color, isMe);
+      const el = makeRunnerEl(p.name, color, isMe);
       const marker = new mapboxgl.Marker({ element: el })
         .setLngLat([p.lng, p.lat])
         .setPopup(new mapboxgl.Popup({ offset: 25, closeButton: false })
@@ -166,15 +177,43 @@ function onParticipantsSnapshot(snapshot) {
         .addTo(map);
       participantMarkers[id] = marker;
     }
+    participantMarkers[id].getElement().style.opacity = opacity;
 
-    if (isMe && followMe) {
+    // Ghost marker — estimated position when stale and pace known
+    if (stale && active && p.pace) {
+      const elapsedMins   = Math.min(age / 60000, 10); // cap estimation at 10 min
+      const estimatedDist = elapsedMins / p.pace;
+      const estimated     = walkForwardOnRoute(p.lat, p.lng, estimatedDist);
+      if (estimated) {
+        const [estLat, estLng] = estimated;
+        if (ghostMarkers[id]) {
+          ghostMarkers[id].setLngLat([estLng, estLat]);
+        } else {
+          const el = makeGhostEl(color);
+          const marker = new mapboxgl.Marker({ element: el })
+            .setLngLat([estLng, estLat])
+            .setPopup(new mapboxgl.Popup({ offset: 25, closeButton: false })
+              .setText(`${p.name} (estimated)`))
+            .addTo(map);
+          ghostMarkers[id] = marker;
+        }
+      }
+    } else if (ghostMarkers[id]) {
+      ghostMarkers[id].remove();
+      delete ghostMarkers[id];
+    }
+
+    if (isMe && followMe && !stale) {
       map.easeTo({ center: [p.lng, p.lat], duration: 500 });
     }
   });
 
-  // Remove stale markers
+  // Remove markers for participants who left
   Object.keys(participantMarkers).forEach(id => {
     if (!all[id]) { participantMarkers[id].remove(); delete participantMarkers[id]; }
+  });
+  Object.keys(ghostMarkers).forEach(id => {
+    if (!all[id]) { ghostMarkers[id].remove(); delete ghostMarkers[id]; }
   });
 
   renderParticipantBar(all, now);
@@ -196,9 +235,9 @@ function makeRunnerEl(name, color, isMe) {
 }
 
 function renderParticipantBar(all, now) {
-  const chips    = document.getElementById('participantChips');
-  const countEl  = document.getElementById('activeCount');
-  const entries  = Object.entries(all);
+  const chips   = document.getElementById('participantChips');
+  const countEl = document.getElementById('activeCount');
+  const entries = Object.entries(all);
 
   const activeCount = entries.filter(([, p]) => now - (p.lastSeen || 0) < 120_000).length;
   countEl.textContent = `${activeCount} active`;
@@ -212,10 +251,37 @@ function renderParticipantBar(all, now) {
     const active = now - (p.lastSeen || 0) < 120_000;
     const color  = participantColors[id] || '#999';
     const isMe   = id === userId;
+
+    const remaining = (active && p.lat && p.lng) ? getRemainingDistance(p.lat, p.lng) : null;
+    const etaStr    = formatETA(remaining, p.pace ?? null);
+    const paceStr   = p.pace ? formatPace(p.pace) : null;
+
+    const age   = now - (p.lastSeen || 0);
+    const stale = active && age > STALE_MS;
+
+    const metaParts = [];
+    if (remaining !== null) metaParts.push(`${remaining.toFixed(1)} km left`);
+    if (etaStr)             metaParts.push(etaStr);
+    if (paceStr)            metaParts.push(paceStr);
+
+    let staleLine = '';
+    if (stale) {
+      const lastSeenStr = new Date(p.lastSeen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const elapsedMins = Math.min(age / 60000, 10);
+      const estM = p.pace ? Math.round(elapsedMins / p.pace * 1000) : null;
+      staleLine = `<span class="chip-stale">last seen ${lastSeenStr}${estM ? ` · est. ~${estM}m ahead` : ''}</span>`;
+    }
+
+    const iosBadge = p.platform === 'ios' ? '<span class="ios-badge">iOS</span>' : '';
+
     return `
       <div class="participant-chip ${active ? '' : 'inactive'}">
         <div class="chip-dot" style="background:${color}"></div>
-        <span>${p.name}${isMe ? ' (You)' : ''}</span>
+        <div class="chip-info">
+          <span class="chip-name">${p.name}${isMe ? ' (You)' : ''}${iosBadge}</span>
+          ${metaParts.length ? `<span class="chip-meta">${metaParts.join(' · ')}</span>` : ''}
+          ${staleLine}
+        </div>
         ${!active ? '<span class="offline-badge">offline</span>' : ''}
       </div>
     `;
@@ -288,12 +354,19 @@ async function endRun() {
   await db.ref(`sessions/${sessionId}`).update({ ended: true, endedAt: Date.now() });
 }
 
+function detectPlatform() {
+  const ua = navigator.userAgent;
+  if (/iPad|iPhone|iPod/.test(ua)) return 'ios';
+  if (/Android/.test(ua)) return 'android';
+  return 'other';
+}
+
 async function startSharing(name) {
   sessionStorage.setItem('rs_name', name);
 
-  // Register in Firebase
   await db.ref(`sessions/${sessionId}/participants/${userId}`).update({
     name,
+    platform: detectPlatform(),
     lat:      null,
     lng:      null,
     lastSeen: Date.now(),
@@ -322,8 +395,27 @@ async function startSharing(name) {
 
 async function pushLocation(lat, lng) {
   if (!isJoined) return;
+  const now = Date.now();
+
+  // Calculate smoothed pace from consecutive GPS updates
+  if (lastPushLocation) {
+    const dt   = (now - lastPushLocation.time) / 60000; // minutes
+    const dist = haversineKm(lastPushLocation.lat, lastPushLocation.lng, lat, lng);
+    // Only update if moved >15m and interval >3s to filter GPS noise
+    if (dist > 0.015 && dt > 0.05) {
+      const instant = dt / dist; // min/km
+      if (instant >= 2 && instant <= 20) { // realistic running pace
+        smoothedPace = smoothedPace
+          ? 0.7 * smoothedPace + 0.3 * instant
+          : instant;
+      }
+    }
+  }
+  lastPushLocation = { lat, lng, time: now };
+
   await db.ref(`sessions/${sessionId}/participants/${userId}`).update({
-    lat, lng, lastSeen: Date.now(),
+    lat, lng, lastSeen: now,
+    ...(smoothedPace && { pace: parseFloat(smoothedPace.toFixed(2)) }),
   });
 }
 
@@ -340,6 +432,104 @@ function leaveRun() {
   btn.textContent = '+ Join Run';
   btn.classList.remove('joined');
   btn.onclick = showJoinModal;
+}
+
+// ── MARKERS ───────────────────────────────────────────────────────────────────
+
+function makeGhostEl(color) {
+  const el = document.createElement('div');
+  el.style.cssText = `
+    width:32px;height:32px;border-radius:50%;
+    background:${color};opacity:0.55;
+    border:2px dashed white;
+    box-shadow:0 2px 6px rgba(0,0,0,.2);
+    display:flex;align-items:center;justify-content:center;
+    color:white;font-size:14px;cursor:pointer;
+  `;
+  el.textContent = '?';
+  return el;
+}
+
+// ── ETA HELPERS ───────────────────────────────────────────────────────────────
+
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 +
+    Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLng/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function getRemainingDistance(lat, lng) {
+  if (routeCoords.length < 2) return null;
+
+  let minDist = Infinity, bestIdx = 0, bestT = 0;
+
+  for (let i = 0; i < routeCoords.length - 1; i++) {
+    const [x1, y1] = routeCoords[i], [x2, y2] = routeCoords[i + 1];
+    const dx = x2 - x1, dy = y2 - y1;
+    const lenSq = dx*dx + dy*dy;
+    const t = lenSq > 0 ? Math.max(0, Math.min(1, ((lng-x1)*dx + (lat-y1)*dy) / lenSq)) : 0;
+    const d = Math.hypot(lng - (x1+t*dx), lat - (y1+t*dy));
+    if (d < minDist) { minDist = d; bestIdx = i; bestT = t; }
+  }
+
+  const [x1, y1] = routeCoords[bestIdx], [x2, y2] = routeCoords[bestIdx + 1];
+  let remaining = haversineKm(y1 + bestT*(y2-y1), x1 + bestT*(x2-x1), y2, x2);
+  for (let i = bestIdx + 1; i < routeCoords.length - 1; i++) {
+    const [ax, ay] = routeCoords[i], [bx, by] = routeCoords[i+1];
+    remaining += haversineKm(ay, ax, by, bx);
+  }
+  return remaining;
+}
+
+function walkForwardOnRoute(lat, lng, distanceKm) {
+  if (routeCoords.length < 2 || distanceKm <= 0) return null;
+
+  // Find closest segment
+  let minDist = Infinity, bestIdx = 0, bestT = 0;
+  for (let i = 0; i < routeCoords.length - 1; i++) {
+    const [x1, y1] = routeCoords[i], [x2, y2] = routeCoords[i + 1];
+    const dx = x2 - x1, dy = y2 - y1;
+    const lenSq = dx*dx + dy*dy;
+    const t = lenSq > 0 ? Math.max(0, Math.min(1, ((lng-x1)*dx + (lat-y1)*dy) / lenSq)) : 0;
+    const d = Math.hypot(lng - (x1+t*dx), lat - (y1+t*dy));
+    if (d < minDist) { minDist = d; bestIdx = i; bestT = t; }
+  }
+
+  // Walk forward distanceKm from projection point
+  const [x1, y1] = routeCoords[bestIdx], [x2, y2] = routeCoords[bestIdx + 1];
+  let curLat = y1 + bestT*(y2-y1), curLng = x1 + bestT*(x2-x1);
+  let left = distanceKm;
+
+  for (let i = bestIdx; i < routeCoords.length - 1; i++) {
+    const [nx, ny] = routeCoords[i + 1];
+    const segDist = haversineKm(curLat, curLng, ny, nx);
+    if (segDist >= left) {
+      const frac = left / segDist;
+      return [curLat + frac*(ny - curLat), curLng + frac*(nx - curLng)];
+    }
+    left -= segDist;
+    curLat = ny; curLng = nx;
+  }
+  // Reached end of route
+  const last = routeCoords[routeCoords.length - 1];
+  return [last[1], last[0]];
+}
+
+function formatETA(remainingKm, paceMinPerKm) {
+  if (remainingKm === null) return null;
+  if (remainingKm < 0.05) return '🏁 Finished';
+  if (!paceMinPerKm) return null;
+  const mins = Math.round(remainingKm * paceMinPerKm);
+  return `~${mins < 1 ? '<1' : mins} min`;
+}
+
+function formatPace(paceMinPerKm) {
+  const mins = Math.floor(paceMinPerKm);
+  const secs = Math.round((paceMinPerKm - mins) * 60).toString().padStart(2, '0');
+  return `${mins}:${secs}/km`;
 }
 
 function showEndedOverlay() {

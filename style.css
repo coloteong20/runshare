@@ -199,13 +199,20 @@ input[type="text"]:focus { border-color: var(--orange); }
 .participants-chips::-webkit-scrollbar { display: none; }
 
 .participant-chip {
-  display: flex; align-items: center; gap: 6px;
-  background: var(--surface); border-radius: 20px;
-  padding: 5px 12px; font-size: 13px; font-weight: 500;
-  white-space: nowrap; flex-shrink: 0;
+  display: flex; align-items: center; gap: 8px;
+  background: var(--surface); border-radius: 12px;
+  padding: 7px 12px; flex-shrink: 0;
 }
 .participant-chip.inactive { opacity: .5; }
 .chip-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.chip-info { display: flex; flex-direction: column; gap: 2px; }
+.chip-name { font-size: 13px; font-weight: 600; white-space: nowrap; display: flex; align-items: center; gap: 5px; }
+.chip-meta { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.chip-stale { font-size: 11px; color: #F59E0B; white-space: nowrap; }
+.ios-badge {
+  font-size: 10px; font-weight: 600; color: white;
+  background: #555; border-radius: 4px; padding: 1px 5px;
+}
 .offline-badge {
   font-size: 10px; color: var(--muted); background: var(--border);
   border-radius: 4px; padding: 1px 5px;
