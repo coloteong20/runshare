@@ -448,4 +448,8 @@ function showToast(msg) {
   setTimeout(() => t.style.opacity = '0', 3000);
 }
 
+function togglePanel() {
+  document.querySelector('.bottom-panel').classList.toggle('collapsed');
+}
+
 document.addEventListener('DOMContentLoaded', initMap);

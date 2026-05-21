@@ -95,7 +95,6 @@ async function init() {
   map.on('load', () => {
     renderRoute(session.route);
     db.ref(`sessions/${sessionId}/participants`).on('value', onParticipantsSnapshot);
-    if (!sessionStorage.getItem('rs_name')) startPreJoinLocation();
   });
 
   db.ref(`sessions/${sessionId}/ended`).on('value', snap => {
@@ -181,7 +180,10 @@ function onParticipantsSnapshot(snapshot) {
       participantMarkers[id].getElement().style.opacity = opacity;
     } else {
       const el = makeRunnerEl(p.name, color, isMe);
-      if (isMe) myMarkerEl = el;
+      if (isMe) {
+        myMarkerEl = el.querySelector('.runner-inner');
+        if (myBearing !== null) applyBearing(myBearing);
+      }
       const marker = new mapboxgl.Marker({ element: el })
         .setLngLat([p.lng, p.lat])
         .setPopup(new mapboxgl.Popup({ offset: 25, closeButton: false })
@@ -228,12 +230,16 @@ function onParticipantsSnapshot(snapshot) {
 }
 
 function makeRunnerEl(name, color, isMe) {
-  // Container includes a direction cone above the circle for compass heading
-  const container = document.createElement('div');
-  container.style.cssText = `
+  // wrapper: Mapbox sets transform:translate() on this for positioning
+  // inner:   we set transform:rotate() on this for compass — must be separate
+  //          or our rotation overwrites Mapbox's translate and the marker disappears
+  const wrapper = document.createElement('div');
+
+  const inner = document.createElement('div');
+  inner.className = 'runner-inner';
+  inner.style.cssText = `
     display:flex;flex-direction:column;align-items:center;
-    width:40px;cursor:pointer;
-    transform-origin:50% 33px;
+    width:40px;cursor:pointer;transform-origin:50% 33px;
   `;
 
   const cone = document.createElement('div');
@@ -253,14 +259,14 @@ function makeRunnerEl(name, color, isMe) {
     box-shadow:0 2px 8px rgba(0,0,0,.35);
     display:flex;align-items:center;justify-content:center;
     color:white;font-weight:700;font-size:15px;
-    font-family:Inter,sans-serif;
-    transition:opacity .3s;
+    font-family:Inter,sans-serif;transition:opacity .3s;
   `;
   circle.textContent = name.charAt(0).toUpperCase();
 
-  container.appendChild(cone);
-  container.appendChild(circle);
-  return container;
+  inner.appendChild(cone);
+  inner.appendChild(circle);
+  wrapper.appendChild(inner);
+  return wrapper;
 }
 
 function renderParticipantBar(all, now) {
@@ -381,6 +387,7 @@ function stopPreJoinLocation() {
 // ── JOIN / LEAVE ──────────────────────────────────────────────────────────────
 
 async function showJoinModal() {
+  startPreJoinLocation(); // user gesture context — iOS will grant location permission
   const modal     = document.getElementById('joinModal');
   const nameInput = document.getElementById('joinName');
 
@@ -535,16 +542,18 @@ function startCompass() {
 }
 
 function onOrientation(e) {
-  // iOS gives webkitCompassHeading; Android gives alpha (0 = north, clockwise)
   const heading = e.webkitCompassHeading ?? (e.alpha !== null ? (360 - e.alpha) % 360 : null);
   if (heading === null || heading === undefined) return;
   myBearing = heading;
-  if (myMarkerEl) {
-    const cone = myMarkerEl.querySelector('.bearing-cone');
-    if (cone) {
-      cone.style.opacity = '1';
-      myMarkerEl.style.transform = `rotate(${heading}deg)`;
-    }
+  applyBearing(heading);
+}
+
+function applyBearing(heading) {
+  if (!myMarkerEl) return;
+  const cone = myMarkerEl.querySelector('.bearing-cone');
+  if (cone) {
+    cone.style.opacity = '1';
+    myMarkerEl.style.transform = `rotate(${heading}deg)`;
   }
 }
 
