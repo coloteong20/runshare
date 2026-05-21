@@ -219,41 +219,51 @@ function onParticipantsSnapshot(snapshot) {
 }
 
 function makeRunnerEl(name, color, isMe) {
-  // wrapper: Mapbox sets transform:translate() on this for positioning
-  // inner:   we set transform:rotate() on this for compass — must be separate
-  //          or our rotation overwrites Mapbox's translate and the marker disappears
+  // wrapper: Mapbox owns the positioning transform on this
+  // inner:   we rotate this for compass — kept separate to avoid conflict
   const wrapper = document.createElement('div');
 
   const inner = document.createElement('div');
   inner.className = 'runner-inner';
-  inner.style.cssText = `
-    display:flex;flex-direction:column;align-items:center;
-    width:40px;cursor:pointer;transform-origin:50% 33px;
-  `;
+  inner.style.cssText = 'cursor:pointer;line-height:0;transform-origin:50% 50%;';
 
-  const cone = document.createElement('div');
-  cone.className = 'bearing-cone';
-  cone.style.cssText = `
-    width:0;height:0;margin-bottom:3px;
-    border-left:6px solid transparent;
-    border-right:6px solid transparent;
-    border-bottom:10px solid ${isMe ? '#FFD700' : color};
-    opacity:0;transition:opacity .2s;
-  `;
+  // SVG marker: circle (50×50) with overflow:visible fan extending upward
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('width', '50');
+  svg.setAttribute('height', '50');
+  svg.setAttribute('viewBox', '0 0 50 50');
+  svg.style.cssText = 'overflow:visible;filter:drop-shadow(0 2px 6px rgba(0,0,0,.35));';
 
-  const circle = document.createElement('div');
-  circle.style.cssText = `
-    width:40px;height:40px;border-radius:50%;
-    background:${color};border:3px solid ${isMe ? '#FFD700' : 'white'};
-    box-shadow:0 2px 8px rgba(0,0,0,.35);
-    display:flex;align-items:center;justify-content:center;
-    color:white;font-weight:700;font-size:15px;
-    font-family:Inter,sans-serif;transition:opacity .3s;
-  `;
-  circle.textContent = name.charAt(0).toUpperCase();
+  // Wide fan — Google Maps style, hidden until bearing available
+  // Path: from circle centre (25,25) → left base → curved tip → right base → close
+  const fan = document.createElementNS(ns, 'path');
+  fan.setAttribute('d', 'M25,25 L8,-2 Q25,-18 42,-2 Z');
+  fan.setAttribute('fill', color);
+  fan.setAttribute('fill-opacity', '0.45');
+  fan.className = 'bearing-cone';
+  fan.style.cssText = 'opacity:0;transition:opacity .3s;';
 
-  inner.appendChild(cone);
-  inner.appendChild(circle);
+  const circle = document.createElementNS(ns, 'circle');
+  circle.setAttribute('cx', '25'); circle.setAttribute('cy', '25'); circle.setAttribute('r', '20');
+  circle.setAttribute('fill', color);
+  circle.setAttribute('stroke', isMe ? '#FFD700' : 'white');
+  circle.setAttribute('stroke-width', '3');
+
+  const text = document.createElementNS(ns, 'text');
+  text.setAttribute('x', '25'); text.setAttribute('y', '25');
+  text.setAttribute('text-anchor', 'middle');
+  text.setAttribute('dominant-baseline', 'central');
+  text.setAttribute('fill', 'white');
+  text.setAttribute('font-size', '15');
+  text.setAttribute('font-weight', '700');
+  text.setAttribute('font-family', 'Inter,-apple-system,sans-serif');
+  text.textContent = name.charAt(0).toUpperCase();
+
+  svg.appendChild(fan);
+  svg.appendChild(circle);
+  svg.appendChild(text);
+  inner.appendChild(svg);
   wrapper.appendChild(inner);
   return wrapper;
 }
