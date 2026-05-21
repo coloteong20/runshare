@@ -309,6 +309,9 @@ function updatePanel() {
     : n === 1
     ? 'Click again to add more waypoints along the route'
     : 'Keep adding points, or name and create your run below';
+
+  // Hide instruction row once the form is visible — saves vertical space on mobile
+  document.querySelector('.instruction').style.display = n >= 2 ? 'none' : 'flex';
 }
 
 function updateDistDisplay() {

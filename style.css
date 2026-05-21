@@ -241,6 +241,22 @@ input[type="text"]:focus { border-color: var(--orange); }
 .center-btn:hover { background: var(--surface); }
 .center-btn.active { background: var(--orange); color: white; border-color: var(--orange); }
 
+/* ── MOBILE COMPACT PANEL ── */
+@media (max-width: 480px) {
+  .bottom-panel {
+    padding: 10px 14px 24px;
+    max-height: 44vh;
+    overflow-y: auto;
+  }
+  .route-stats { gap: 7px; margin-top: 10px; }
+  .stat-block  { padding: 6px 10px; }
+  .stat-value  { font-size: 16px; }
+  .route-actions { gap: 4px; }
+  .btn-sm { padding: 5px 9px; font-size: 11px; }
+  .create-form { gap: 8px; margin-top: 10px; }
+  input[type="text"] { padding: 10px 12px; font-size: 14px; }
+}
+
 /* ── MAPBOX OVERRIDES ── */
 .mapboxgl-ctrl-top-left  { top: 64px !important; }
 .mapboxgl-ctrl-top-right { top: 64px !important; }
