@@ -34,6 +34,8 @@ let trailVisible       = {};
 let lastTrailPoint     = null;
 let myMarkerEl         = null;
 let myBearing          = null;
+let preJoinWatchId     = null;
+let preJoinMarker      = null;
 
 const STALE_MS       = 30_000;
 const START_RADIUS_M = 50;
@@ -91,9 +93,9 @@ async function init() {
   map.addControl(geolocate, 'top-right');
 
   map.on('load', () => {
-    geolocate.trigger(); // show location dot immediately on load
     renderRoute(session.route);
     db.ref(`sessions/${sessionId}/participants`).on('value', onParticipantsSnapshot);
+    if (!sessionStorage.getItem('rs_name')) startPreJoinLocation();
   });
 
   db.ref(`sessions/${sessionId}/ended`).on('value', snap => {
@@ -350,6 +352,32 @@ async function toggleTrail(participantId) {
   renderParticipantBar(lastParticipants, Date.now());
 }
 
+// ── PRE-JOIN LOCATION DOT ─────────────────────────────────────────────────────
+
+function startPreJoinLocation() {
+  if (!navigator.geolocation) return;
+  preJoinWatchId = navigator.geolocation.watchPosition(pos => {
+    const { latitude: lat, longitude: lng } = pos.coords;
+    if (!preJoinMarker) {
+      const el = document.createElement('div');
+      el.style.cssText = `
+        width:16px;height:16px;border-radius:50%;
+        background:#4285F4;border:3px solid white;
+        box-shadow:0 0 0 5px rgba(66,133,244,0.25);
+      `;
+      preJoinMarker = new mapboxgl.Marker({ element: el }).setLngLat([lng, lat]).addTo(map);
+      map.easeTo({ center: [lng, lat], duration: 800 });
+    } else {
+      preJoinMarker.setLngLat([lng, lat]);
+    }
+  }, null, { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 });
+}
+
+function stopPreJoinLocation() {
+  if (preJoinWatchId !== null) { navigator.geolocation.clearWatch(preJoinWatchId); preJoinWatchId = null; }
+  if (preJoinMarker) { preJoinMarker.remove(); preJoinMarker = null; }
+}
+
 // ── JOIN / LEAVE ──────────────────────────────────────────────────────────────
 
 async function showJoinModal() {
@@ -380,6 +408,10 @@ function handleJoinKey(e) {
 }
 
 async function submitJoin() {
+  // Must call before any await — iOS requires DeviceOrientationEvent.requestPermission
+  // to be invoked synchronously within a user gesture handler
+  startCompass();
+
   const name = document.getElementById('joinName').value.trim();
   if (!name) { document.getElementById('joinName').focus(); return; }
 
@@ -404,7 +436,6 @@ async function submitJoin() {
   }
 
   hideJoinModal();
-  startCompass(); // must be called within user gesture
   await startSharing(name);
 }
 
@@ -422,6 +453,7 @@ function detectPlatform() {
 }
 
 async function startSharing(name) {
+  stopPreJoinLocation();
   sessionStorage.setItem('rs_name', name);
 
   await db.ref(`sessions/${sessionId}/participants/${userId}`).update({
