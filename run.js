@@ -9,7 +9,6 @@ const COLORS = [
   '#F59E0B', '#EC4899', '#14B8A6', '#F97316',
 ];
 
-// Persist user identity across page reloads within the same session
 let userId = sessionStorage.getItem('rs_uid') || (() => {
   const id = Math.random().toString(36).slice(2, 11);
   sessionStorage.setItem('rs_uid', id);
@@ -18,40 +17,51 @@ let userId = sessionStorage.getItem('rs_uid') || (() => {
 
 let map;
 let sessionId;
-let sessionPassword  = null;
-let isCreator        = false;
-let watchId          = null;
-let isJoined         = false;
-let followMe         = false;
-let colorIndex       = 0;
+let sessionPassword    = null;
+let isCreator          = false;
+let watchId            = null;
+let isJoined           = false;
+let followMe           = false;
+let colorIndex         = 0;
 let participantColors  = {};
 let participantMarkers = {};
-let routeCoords      = [];   // full route [[lng,lat], ...]
-let lastPushLocation = null; // for pace calculation
-let smoothedPace     = null; // min/km, exponential moving average
-let ghostMarkers     = {};   // estimated position markers for stale participants
+let routeCoords        = [];
+let lastPushLocation   = null;
+let smoothedPace       = null;
+let ghostMarkers       = {};
+let lastParticipants   = {};
+let trailVisible       = {};
+let lastTrailPoint     = null;
+let myMarkerEl         = null;
+let myBearing          = null;
 
-const STALE_MS = 30_000;    // 30s without update = stale
-const START_RADIUS_M = 50;  // within 50m of start = not started
+const STALE_MS       = 30_000;
+const START_RADIUS_M = 50;
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
 
 async function init() {
+  // Warn if opened in Telegram's in-app browser (GPS won't work)
+  if (window.TelegramWebviewProxy || /Telegram/i.test(navigator.userAgent)) {
+    const banner = document.createElement('div');
+    banner.style.cssText = `position:fixed;top:0;left:0;right:0;z-index:9999;
+      background:#229ED9;color:white;padding:12px 16px;text-align:center;
+      font-family:Inter,sans-serif;font-size:14px;font-weight:600;line-height:1.4;`;
+    banner.innerHTML = `GPS doesn't work in Telegram — <a href="${location.href}" target="_blank"
+      style="color:white;text-decoration:underline">tap here to open in your browser</a>`;
+    document.body.prepend(banner);
+  }
+
   sessionId = new URLSearchParams(location.search).get('s');
-  console.log('[RunShare] init — sessionId:', sessionId);
   if (!sessionId) return showError('No session ID in link.');
 
-  // Load session from Firebase immediately — don't wait for map
   let session;
   try {
-    console.log('[RunShare] Fetching from Firebase...');
     const snap = await db.ref(`sessions/${sessionId}`).once('value');
-    console.log('[RunShare] Snapshot exists:', snap.exists(), '| val:', snap.val());
     if (!snap.exists()) return showError('Session not found — the link may be invalid.');
     session = snap.val();
     routeCoords = session.route || [];
   } catch (err) {
-    console.error('[RunShare] Firebase read error:', err);
     return showError('Could not connect to database: ' + err.message);
   }
 
@@ -60,7 +70,6 @@ async function init() {
   sessionPassword = session.password || null;
   isCreator = session.creatorId === userId;
 
-  // Update header immediately
   document.getElementById('sessionTitle').textContent = session.name;
   document.getElementById('sessionMeta').textContent =
     `${session.distanceKm?.toFixed(1) ?? '?'} km`;
@@ -75,26 +84,25 @@ async function init() {
     zoom: 13,
   });
 
-  map.addControl(new mapboxgl.GeolocateControl({
+  const geolocate = new mapboxgl.GeolocateControl({
     positionOptions: { enableHighAccuracy: true },
     trackUserLocation: false,
-  }), 'top-right');
+  });
+  map.addControl(geolocate, 'top-right');
 
   map.on('load', () => {
+    geolocate.trigger(); // show location dot immediately on load
     renderRoute(session.route);
     db.ref(`sessions/${sessionId}/participants`).on('value', onParticipantsSnapshot);
   });
 
-  // Listen for run being ended by creator
   db.ref(`sessions/${sessionId}/ended`).on('value', snap => {
     if (snap.val() === true) showEndedOverlay();
   });
 
-  // Re-join automatically if the user already had a name this session
   const savedName = sessionStorage.getItem('rs_name');
   if (savedName) startSharing(savedName);
 
-  // Stop sharing if user closes or navigates away
   window.addEventListener('beforeunload', () => {
     if (isJoined) db.ref(`sessions/${sessionId}/participants/${userId}`).update({ active: false });
   });
@@ -103,6 +111,7 @@ async function init() {
 // ── ROUTE ─────────────────────────────────────────────────────────────────────
 
 function renderRoute(coordinates) {
+  if (!coordinates?.length) return;
   const bounds = coordinates.reduce(
     (b, c) => b.extend(c),
     new mapboxgl.LngLatBounds(coordinates[0], coordinates[0])
@@ -125,7 +134,6 @@ function renderRoute(coordinates) {
     paint: { 'line-color': '#FF6B35', 'line-width': 4 },
   });
 
-  // Start / finish markers
   addStaticMarker(coordinates[0], '#10B981');
   if (JSON.stringify(coordinates[0]) !== JSON.stringify(coordinates.at(-1))) {
     addStaticMarker(coordinates.at(-1), '#EF4444');
@@ -133,7 +141,7 @@ function renderRoute(coordinates) {
 }
 
 function addStaticMarker(lngLat, color) {
-  const el  = document.createElement('div');
+  const el = document.createElement('div');
   el.style.cssText = `
     width:14px;height:14px;border-radius:50%;
     background:${color};border:3px solid white;
@@ -145,32 +153,29 @@ function addStaticMarker(lngLat, color) {
 // ── PARTICIPANTS ──────────────────────────────────────────────────────────────
 
 function onParticipantsSnapshot(snapshot) {
-  const all  = snapshot.val() || {};
-  const now  = Date.now();
+  const all = snapshot.val() || {};
+  const now = Date.now();
+  lastParticipants = all;
 
-  // Assign colors to new participants
   Object.keys(all).forEach(id => {
-    if (!participantColors[id]) {
-      participantColors[id] = COLORS[colorIndex++ % COLORS.length];
-    }
+    if (!participantColors[id]) participantColors[id] = COLORS[colorIndex++ % COLORS.length];
   });
 
-  // Update / create markers
   Object.entries(all).forEach(([id, p]) => {
     if (!p.lat || !p.lng) return;
-    const isMe   = id === userId;
-    const age    = now - (p.lastSeen || 0);
+    const isMe  = id === userId;
+    const age   = now - (p.lastSeen || 0);
     const active = age < 120_000;
     const stale  = age > STALE_MS;
     const color  = participantColors[id];
-
-    // Real marker — faded when stale
     const opacity = !active ? '0.3' : stale ? '0.5' : '1';
+
     if (participantMarkers[id]) {
       participantMarkers[id].setLngLat([p.lng, p.lat]);
       participantMarkers[id].getElement().style.opacity = opacity;
     } else {
       const el = makeRunnerEl(p.name, color, isMe);
+      if (isMe) myMarkerEl = el;
       const marker = new mapboxgl.Marker({ element: el })
         .setLngLat([p.lng, p.lat])
         .setPopup(new mapboxgl.Popup({ offset: 25, closeButton: false })
@@ -180,9 +185,9 @@ function onParticipantsSnapshot(snapshot) {
     }
     participantMarkers[id].getElement().style.opacity = opacity;
 
-    // Ghost marker — estimated position when stale and pace known
+    // Ghost marker for stale-but-recent participants with known pace
     if (stale && active && p.pace) {
-      const elapsedMins   = Math.min(age / 60000, 10); // cap estimation at 10 min
+      const elapsedMins   = Math.min(age / 60000, 10);
       const estimatedDist = elapsedMins / p.pace;
       const estimated     = walkForwardOnRoute(p.lat, p.lng, estimatedDist);
       if (estimated) {
@@ -191,12 +196,11 @@ function onParticipantsSnapshot(snapshot) {
           ghostMarkers[id].setLngLat([estLng, estLat]);
         } else {
           const el = makeGhostEl(color);
-          const marker = new mapboxgl.Marker({ element: el })
+          ghostMarkers[id] = new mapboxgl.Marker({ element: el })
             .setLngLat([estLng, estLat])
             .setPopup(new mapboxgl.Popup({ offset: 25, closeButton: false })
               .setText(`${p.name} (estimated)`))
             .addTo(map);
-          ghostMarkers[id] = marker;
         }
       }
     } else if (ghostMarkers[id]) {
@@ -204,12 +208,9 @@ function onParticipantsSnapshot(snapshot) {
       delete ghostMarkers[id];
     }
 
-    if (isMe && followMe && !stale) {
-      map.easeTo({ center: [p.lng, p.lat], duration: 500 });
-    }
+    if (isMe && followMe && !stale) map.easeTo({ center: [p.lng, p.lat], duration: 500 });
   });
 
-  // Remove markers for participants who left
   Object.keys(participantMarkers).forEach(id => {
     if (!all[id]) { participantMarkers[id].remove(); delete participantMarkers[id]; }
   });
@@ -221,18 +222,39 @@ function onParticipantsSnapshot(snapshot) {
 }
 
 function makeRunnerEl(name, color, isMe) {
-  const el = document.createElement('div');
-  el.style.cssText = `
+  // Container includes a direction cone above the circle for compass heading
+  const container = document.createElement('div');
+  container.style.cssText = `
+    display:flex;flex-direction:column;align-items:center;
+    width:40px;cursor:pointer;
+    transform-origin:50% 33px;
+  `;
+
+  const cone = document.createElement('div');
+  cone.className = 'bearing-cone';
+  cone.style.cssText = `
+    width:0;height:0;margin-bottom:3px;
+    border-left:6px solid transparent;
+    border-right:6px solid transparent;
+    border-bottom:10px solid ${isMe ? '#FFD700' : color};
+    opacity:0;transition:opacity .2s;
+  `;
+
+  const circle = document.createElement('div');
+  circle.style.cssText = `
     width:40px;height:40px;border-radius:50%;
     background:${color};border:3px solid ${isMe ? '#FFD700' : 'white'};
     box-shadow:0 2px 8px rgba(0,0,0,.35);
     display:flex;align-items:center;justify-content:center;
     color:white;font-weight:700;font-size:15px;
-    font-family:Inter,sans-serif;cursor:pointer;
+    font-family:Inter,sans-serif;
     transition:opacity .3s;
   `;
-  el.textContent = name.charAt(0).toUpperCase();
-  return el;
+  circle.textContent = name.charAt(0).toUpperCase();
+
+  container.appendChild(cone);
+  container.appendChild(circle);
+  return container;
 }
 
 function renderParticipantBar(all, now) {
@@ -253,21 +275,21 @@ function renderParticipantBar(all, now) {
     const color  = participantColors[id] || '#999';
     const isMe   = id === userId;
 
-    const remaining   = (active && p.lat && p.lng) ? getRemainingDistance(p.lat, p.lng) : null;
-    const notStarted  = (active && p.lat && p.lng && routeCoords.length > 0)
+    const remaining  = (active && p.lat && p.lng) ? getRemainingDistance(p.lat, p.lng) : null;
+    const notStarted = (active && p.lat && p.lng && routeCoords.length > 0)
       ? haversineKm(p.lat, p.lng, routeCoords[0][1], routeCoords[0][0]) * 1000 < START_RADIUS_M
       : false;
-    const etaStr    = notStarted ? null : formatETA(remaining, p.pace ?? null);
-    const paceStr   = notStarted ? null : (p.pace ? formatPace(p.pace) : null);
+    const etaStr  = notStarted ? null : formatETA(remaining, p.pace ?? null);
+    const paceStr = notStarted ? null : (p.pace ? formatPace(p.pace) : null);
 
     const age   = now - (p.lastSeen || 0);
     const stale = active && age > STALE_MS;
 
     const metaParts = [];
-    if (notStarted)         metaParts.push('Not started');
+    if (notStarted)              metaParts.push('Not started');
     else if (remaining !== null) metaParts.push(`${remaining.toFixed(1)} km left`);
-    if (etaStr)             metaParts.push(etaStr);
-    if (paceStr)            metaParts.push(paceStr);
+    if (etaStr)                  metaParts.push(etaStr);
+    if (paceStr)                 metaParts.push(paceStr);
 
     let staleLine = '';
     if (stale) {
@@ -277,10 +299,12 @@ function renderParticipantBar(all, now) {
       staleLine = `<span class="chip-stale">last seen ${lastSeenStr}${estM ? ` · est. ~${estM}m ahead` : ''}</span>`;
     }
 
-    const iosBadge = p.platform === 'ios' ? '<span class="ios-badge">iOS</span>' : '';
+    const iosBadge    = p.platform === 'ios' ? '<span class="ios-badge">iOS</span>' : '';
+    const trailActive = trailVisible[id] || false;
 
     return `
-      <div class="participant-chip ${active ? '' : 'inactive'}">
+      <div class="participant-chip ${active ? '' : 'inactive'} ${trailActive ? 'trail-on' : ''}"
+           onclick="toggleTrail('${id}')" title="Tap to show/hide trail">
         <div class="chip-dot" style="background:${color}"></div>
         <div class="chip-info">
           <span class="chip-name">${p.name}${isMe ? ' (You)' : ''}${iosBadge}</span>
@@ -293,21 +317,49 @@ function renderParticipantBar(all, now) {
   }).join('');
 }
 
+// ── TRAILS ────────────────────────────────────────────────────────────────────
+
+async function toggleTrail(participantId) {
+  if (trailVisible[participantId]) {
+    if (map.getLayer(`trail-${participantId}`)) map.removeLayer(`trail-${participantId}`);
+    if (map.getSource(`trail-${participantId}`)) map.removeSource(`trail-${participantId}`);
+    trailVisible[participantId] = false;
+  } else {
+    const snap = await db.ref(`sessions/${sessionId}/trails/${participantId}`).once('value');
+    const raw  = snap.val();
+    if (!raw) return;
+    const coords = Object.values(raw).map(p => [p.lng, p.lat]);
+    if (coords.length < 2) return;
+    const color = participantColors[participantId] || '#999';
+    map.addSource(`trail-${participantId}`, {
+      type: 'geojson',
+      data: { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } },
+    });
+    map.addLayer({
+      id: `trail-${participantId}`,
+      type: 'line', source: `trail-${participantId}`,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': color, 'line-width': 2, 'line-opacity': 0.65, 'line-dasharray': [2, 2] },
+    });
+    trailVisible[participantId] = true;
+  }
+  renderParticipantBar(lastParticipants, Date.now());
+}
+
 // ── JOIN / LEAVE ──────────────────────────────────────────────────────────────
 
 async function showJoinModal() {
-  const modal = document.getElementById('joinModal');
+  const modal     = document.getElementById('joinModal');
   const nameInput = document.getElementById('joinName');
 
-  // Lock to existing name if this user already joined before
   const snap = await db.ref(`sessions/${sessionId}/participants/${userId}`).once('value');
   if (snap.exists() && snap.val().name) {
-    nameInput.value = snap.val().name;
+    nameInput.value    = snap.val().name;
     nameInput.readOnly = true;
     nameInput.style.cssText += ';background:var(--surface);color:var(--muted);cursor:not-allowed';
   } else {
-    nameInput.readOnly = false;
-    nameInput.value = '';
+    nameInput.readOnly  = false;
+    nameInput.value     = '';
     nameInput.style.cssText = '';
   }
 
@@ -336,20 +388,19 @@ async function submitJoin() {
     }
   }
 
-  // Check for duplicate name
   const snap = await db.ref(`sessions/${sessionId}/participants`).once('value');
   const participants = snap.val() || {};
   const nameTaken = Object.entries(participants).some(
     ([id, p]) => p.name?.toLowerCase() === name.toLowerCase() && id !== userId
   );
   if (nameTaken) {
-    const nameErr = document.getElementById('nameError');
-    nameErr.style.display = 'block';
+    document.getElementById('nameError').style.display = 'block';
     document.getElementById('joinName').focus();
     return;
   }
 
   hideJoinModal();
+  startCompass(); // must be called within user gesture
   await startSharing(name);
 }
 
@@ -379,11 +430,7 @@ async function startSharing(name) {
     active:   true,
   });
 
-  // Start GPS
-  if (!navigator.geolocation) {
-    alert('Your browser does not support location sharing.');
-    return;
-  }
+  if (!navigator.geolocation) { alert('Your browser does not support location sharing.'); return; }
 
   watchId = navigator.geolocation.watchPosition(
     pos => pushLocation(pos.coords.latitude, pos.coords.longitude),
@@ -402,17 +449,13 @@ async function pushLocation(lat, lng) {
   if (!isJoined) return;
   const now = Date.now();
 
-  // Calculate smoothed pace from consecutive GPS updates
   if (lastPushLocation) {
-    const dt   = (now - lastPushLocation.time) / 60000; // minutes
+    const dt   = (now - lastPushLocation.time) / 60000;
     const dist = haversineKm(lastPushLocation.lat, lastPushLocation.lng, lat, lng);
-    // Only update if moved >15m and interval >3s to filter GPS noise
     if (dist > 0.015 && dt > 0.05) {
-      const instant = dt / dist; // min/km
-      if (instant >= 2 && instant <= 20) { // realistic running pace
-        smoothedPace = smoothedPace
-          ? 0.7 * smoothedPace + 0.3 * instant
-          : instant;
+      const instant = dt / dist;
+      if (instant >= 2 && instant <= 20) {
+        smoothedPace = smoothedPace ? 0.7 * smoothedPace + 0.3 * instant : instant;
       }
     }
   }
@@ -422,21 +465,51 @@ async function pushLocation(lat, lng) {
     lat, lng, lastSeen: now,
     ...(smoothedPace && { pace: parseFloat(smoothedPace.toFixed(2)) }),
   });
+
+  // Append to trail, throttled to >20m movement
+  if (!lastTrailPoint || haversineKm(lastTrailPoint.lat, lastTrailPoint.lng, lat, lng) > 0.02) {
+    db.ref(`sessions/${sessionId}/trails/${userId}`).push({ lat, lng });
+    lastTrailPoint = { lat, lng };
+  }
 }
 
 function leaveRun() {
-  if (watchId !== null) {
-    navigator.geolocation.clearWatch(watchId);
-    watchId = null;
-  }
+  if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
   db.ref(`sessions/${sessionId}/participants/${userId}`).update({ active: false });
   sessionStorage.removeItem('rs_name');
   isJoined = false;
-
   const btn = document.getElementById('joinBtn');
   btn.textContent = '+ Join Run';
   btn.classList.remove('joined');
   btn.onclick = showJoinModal;
+}
+
+// ── COMPASS ───────────────────────────────────────────────────────────────────
+
+function startCompass() {
+  if (typeof DeviceOrientationEvent === 'undefined') return;
+  if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+    // iOS 13+ requires explicit permission within a user gesture
+    DeviceOrientationEvent.requestPermission()
+      .then(state => { if (state === 'granted') window.addEventListener('deviceorientation', onOrientation, true); })
+      .catch(() => {});
+  } else {
+    window.addEventListener('deviceorientation', onOrientation, true);
+  }
+}
+
+function onOrientation(e) {
+  // iOS gives webkitCompassHeading; Android gives alpha (0 = north, clockwise)
+  const heading = e.webkitCompassHeading ?? (e.alpha !== null ? (360 - e.alpha) % 360 : null);
+  if (heading === null || heading === undefined) return;
+  myBearing = heading;
+  if (myMarkerEl) {
+    const cone = myMarkerEl.querySelector('.bearing-cone');
+    if (cone) {
+      cone.style.opacity = '1';
+      myMarkerEl.style.transform = `rotate(${heading}deg)`;
+    }
+  }
 }
 
 // ── MARKERS ───────────────────────────────────────────────────────────────────
@@ -455,7 +528,7 @@ function makeGhostEl(color) {
   return el;
 }
 
-// ── ETA HELPERS ───────────────────────────────────────────────────────────────
+// ── MATH HELPERS ─────────────────────────────────────────────────────────────
 
 function haversineKm(lat1, lng1, lat2, lng2) {
   const R = 6371;
@@ -468,18 +541,14 @@ function haversineKm(lat1, lng1, lat2, lng2) {
 
 function getRemainingDistance(lat, lng) {
   if (routeCoords.length < 2) return null;
-
   let minDist = Infinity, bestIdx = 0, bestT = 0;
-
   for (let i = 0; i < routeCoords.length - 1; i++) {
     const [x1, y1] = routeCoords[i], [x2, y2] = routeCoords[i + 1];
-    const dx = x2 - x1, dy = y2 - y1;
-    const lenSq = dx*dx + dy*dy;
+    const dx = x2 - x1, dy = y2 - y1, lenSq = dx*dx + dy*dy;
     const t = lenSq > 0 ? Math.max(0, Math.min(1, ((lng-x1)*dx + (lat-y1)*dy) / lenSq)) : 0;
     const d = Math.hypot(lng - (x1+t*dx), lat - (y1+t*dy));
     if (d < minDist) { minDist = d; bestIdx = i; bestT = t; }
   }
-
   const [x1, y1] = routeCoords[bestIdx], [x2, y2] = routeCoords[bestIdx + 1];
   let remaining = haversineKm(y1 + bestT*(y2-y1), x1 + bestT*(x2-x1), y2, x2);
   for (let i = bestIdx + 1; i < routeCoords.length - 1; i++) {
@@ -491,23 +560,17 @@ function getRemainingDistance(lat, lng) {
 
 function walkForwardOnRoute(lat, lng, distanceKm) {
   if (routeCoords.length < 2 || distanceKm <= 0) return null;
-
-  // Find closest segment
   let minDist = Infinity, bestIdx = 0, bestT = 0;
   for (let i = 0; i < routeCoords.length - 1; i++) {
     const [x1, y1] = routeCoords[i], [x2, y2] = routeCoords[i + 1];
-    const dx = x2 - x1, dy = y2 - y1;
-    const lenSq = dx*dx + dy*dy;
+    const dx = x2 - x1, dy = y2 - y1, lenSq = dx*dx + dy*dy;
     const t = lenSq > 0 ? Math.max(0, Math.min(1, ((lng-x1)*dx + (lat-y1)*dy) / lenSq)) : 0;
     const d = Math.hypot(lng - (x1+t*dx), lat - (y1+t*dy));
     if (d < minDist) { minDist = d; bestIdx = i; bestT = t; }
   }
-
-  // Walk forward distanceKm from projection point
   const [x1, y1] = routeCoords[bestIdx], [x2, y2] = routeCoords[bestIdx + 1];
   let curLat = y1 + bestT*(y2-y1), curLng = x1 + bestT*(x2-x1);
   let left = distanceKm;
-
   for (let i = bestIdx; i < routeCoords.length - 1; i++) {
     const [nx, ny] = routeCoords[i + 1];
     const segDist = haversineKm(curLat, curLng, ny, nx);
@@ -515,10 +578,8 @@ function walkForwardOnRoute(lat, lng, distanceKm) {
       const frac = left / segDist;
       return [curLat + frac*(ny - curLat), curLng + frac*(nx - curLng)];
     }
-    left -= segDist;
-    curLat = ny; curLng = nx;
+    left -= segDist; curLat = ny; curLng = nx;
   }
-  // Reached end of route
   const last = routeCoords[routeCoords.length - 1];
   return [last[1], last[0]];
 }

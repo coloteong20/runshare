@@ -11,11 +11,12 @@ const creatorId = sessionStorage.getItem('rs_uid') || (() => {
 })();
 
 let map;
-let waypoints  = [];   // [[lng, lat], ...]
-let markers    = [];   // mapboxgl.Marker instances
-let routeCoords = [];  // snapped route from Directions API
-let routeDistKm = 0;
-let isSaving   = false;
+let waypoints       = [];
+let markers         = [];
+let routeCoords     = [];
+let routeDistKm     = 0;
+let isSaving        = false;
+let elevationVisible = false;
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
 
@@ -65,6 +66,27 @@ function initMap() {
       source: 'route',
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: { 'line-color': '#FF6B35', 'line-width': 4 },
+    });
+
+    // Terrain source for elevation queries (no visual exaggeration)
+    map.addSource('mapbox-dem', {
+      type: 'raster-dem',
+      url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
+      tileSize: 512,
+      maxzoom: 14,
+    });
+    map.setTerrain({ source: 'mapbox-dem', exaggeration: 0 });
+
+    // Elevation overlay — colored segments drawn over route-casing
+    map.addSource('route-elevation', {
+      type: 'geojson',
+      data: { type: 'FeatureCollection', features: [] },
+    });
+    map.addLayer({
+      id: 'route-elevation-layer',
+      type: 'line', source: 'route-elevation',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': ['get', 'color'], 'line-width': 4 },
     });
 
     map.on('click', onMapClick);
@@ -124,6 +146,7 @@ async function refreshRoute() {
     showToast('Could not snap to roads — using straight lines');
   }
   setRouteOnMap(routeCoords);
+  if (elevationVisible) clearElevation();
   updateDistDisplay();
 }
 
@@ -155,6 +178,14 @@ function setRouteOnMap(coordinates) {
 
 // ── CONTROLS ──────────────────────────────────────────────────────────────────
 
+async function undoLastMarker() {
+  if (!waypoints.length) return;
+  waypoints.pop();
+  markers.pop()?.remove();
+  await refreshRoute();
+  updatePanel();
+}
+
 async function closeLoop() {
   if (waypoints.length < 2) return;
   waypoints.push([...waypoints[0]]);
@@ -173,8 +204,89 @@ function clearRoute() {
   markers.forEach(m => m.remove());
   markers = [];
   setRouteOnMap([]);
+  clearElevation();
   updatePanel();
   updateDistDisplay();
+}
+
+// ── ELEVATION ─────────────────────────────────────────────────────────────────
+
+async function toggleElevation() {
+  if (elevationVisible) {
+    clearElevation();
+    return;
+  }
+  const btn = document.getElementById('elevationBtn');
+  btn.textContent = 'Loading…';
+  btn.disabled    = true;
+  await updateElevationDisplay();
+  btn.disabled    = false;
+}
+
+function clearElevation() {
+  if (map.getSource('route-elevation')) {
+    map.getSource('route-elevation').setData({ type: 'FeatureCollection', features: [] });
+  }
+  elevationVisible = false;
+  document.getElementById('elevationBtn').textContent = '⛰ Elevation';
+  document.getElementById('climbVal').textContent = '—';
+}
+
+async function updateElevationDisplay() {
+  if (routeCoords.length < 2) return;
+
+  // Allow terrain tiles to load before querying
+  await new Promise(r => setTimeout(r, 1200));
+
+  const step    = Math.max(1, Math.floor(routeCoords.length / 150));
+  const samples = routeCoords.filter((_, i) => i % step === 0);
+  if (samples[samples.length - 1] !== routeCoords[routeCoords.length - 1]) {
+    samples.push(routeCoords[routeCoords.length - 1]);
+  }
+
+  const pts = samples.map(([lng, lat]) => ({
+    lng, lat, elev: map.queryTerrainElevation([lng, lat]) ?? 0,
+  }));
+
+  const features = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p1 = pts[i], p2 = pts[i + 1];
+    const distM = haversineKm(p1.lat, p1.lng, p2.lat, p2.lng) * 1000;
+    const slope = distM > 0 ? ((p2.elev - p1.elev) / distM) * 100 : 0;
+    features.push({
+      type: 'Feature',
+      properties: { color: slopeColor(slope) },
+      geometry: { type: 'LineString', coordinates: [[p1.lng, p1.lat], [p2.lng, p2.lat]] },
+    });
+  }
+
+  map.getSource('route-elevation').setData({ type: 'FeatureCollection', features });
+  elevationVisible = true;
+  document.getElementById('elevationBtn').textContent = '⛰ Hide';
+
+  const totalClimb = pts.reduce((sum, p, i) => {
+    if (i === 0) return 0;
+    const rise = p.elev - pts[i - 1].elev;
+    return sum + (rise > 0 ? rise : 0);
+  }, 0);
+  document.getElementById('climbVal').textContent = `+${Math.round(totalClimb)}m`;
+}
+
+function slopeColor(slope) {
+  if (slope > 8)  return '#EF4444'; // very steep
+  if (slope > 5)  return '#F97316'; // steep
+  if (slope > 2)  return '#F59E0B'; // gentle uphill
+  if (slope > -2) return '#10B981'; // flat
+  return '#3B82F6';                 // downhill
+}
+
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 +
+    Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLng/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
 // ── PANEL UI ──────────────────────────────────────────────────────────────────
