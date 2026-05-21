@@ -28,10 +28,6 @@ function initMap() {
     zoom: 13,
   });
 
-  // Try to center on user's current location
-  navigator.geolocation?.getCurrentPosition(pos => {
-    map.setCenter([pos.coords.longitude, pos.coords.latitude]);
-  });
 
   // Search box
   const geocoder = new MapboxGeocoder({
@@ -464,8 +460,8 @@ function initPanelSwipe() {
     if (startY === null) return;
     const delta = e.changedTouches[0].clientY - startY;
     startY = null;
-    if (delta > 40)  panel.classList.add('collapsed');
-    if (delta < -40) panel.classList.remove('collapsed');
+    if (delta > 20)  panel.classList.add('collapsed');
+    if (delta < -20) panel.classList.remove('collapsed');
   }, { passive: true });
 }
 

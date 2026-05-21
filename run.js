@@ -43,17 +43,6 @@ const START_RADIUS_M = 50;
 // ── INIT ──────────────────────────────────────────────────────────────────────
 
 async function init() {
-  // Warn if opened in Telegram's in-app browser (GPS won't work)
-  if (window.TelegramWebviewProxy || /Telegram/i.test(navigator.userAgent)) {
-    const banner = document.createElement('div');
-    banner.style.cssText = `position:fixed;top:0;left:0;right:0;z-index:9999;
-      background:#229ED9;color:white;padding:12px 16px;text-align:center;
-      font-family:Inter,sans-serif;font-size:14px;font-weight:600;line-height:1.4;`;
-    banner.innerHTML = `GPS doesn't work in Telegram — <a href="${location.href}" target="_blank"
-      style="color:white;text-decoration:underline">tap here to open in your browser</a>`;
-    document.body.prepend(banner);
-  }
-
   sessionId = new URLSearchParams(location.search).get('s');
   if (!sessionId) return showError('No session ID in link.');
 
@@ -361,27 +350,39 @@ async function toggleTrail(participantId) {
 // ── PRE-JOIN LOCATION DOT ─────────────────────────────────────────────────────
 
 function startPreJoinLocation() {
-  if (!navigator.geolocation) return;
-  preJoinWatchId = navigator.geolocation.watchPosition(pos => {
+  if (preJoinMarker) return;
+  navigator.geolocation?.getCurrentPosition(pos => {
+    if (isJoined) return; // user joined while waiting for fix — skip dot
     const { latitude: lat, longitude: lng } = pos.coords;
-    if (!preJoinMarker) {
-      const el = document.createElement('div');
-      el.style.cssText = `
-        width:16px;height:16px;border-radius:50%;
-        background:#4285F4;border:3px solid white;
-        box-shadow:0 0 0 5px rgba(66,133,244,0.25);
-      `;
-      preJoinMarker = new mapboxgl.Marker({ element: el }).setLngLat([lng, lat]).addTo(map);
-      map.easeTo({ center: [lng, lat], duration: 800 });
-    } else {
-      preJoinMarker.setLngLat([lng, lat]);
-    }
-  }, null, { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 });
+    const el = document.createElement('div');
+    el.style.cssText = `
+      width:16px;height:16px;border-radius:50%;
+      background:#4285F4;border:3px solid white;
+      box-shadow:0 0 0 5px rgba(66,133,244,0.25);
+    `;
+    preJoinMarker = new mapboxgl.Marker({ element: el }).setLngLat([lng, lat]).addTo(map);
+    map.easeTo({ center: [lng, lat], duration: 800 });
+  }, err => {
+    // GPS blocked — likely an in-app browser (Telegram, Instagram, etc.)
+    if (err.code === 1 || err.code === 2) showOpenInBrowserBanner();
+  }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 });
 }
 
 function stopPreJoinLocation() {
-  if (preJoinWatchId !== null) { navigator.geolocation.clearWatch(preJoinWatchId); preJoinWatchId = null; }
   if (preJoinMarker) { preJoinMarker.remove(); preJoinMarker = null; }
+}
+
+function showOpenInBrowserBanner() {
+  if (document.getElementById('browser-banner')) return;
+  const banner = document.createElement('div');
+  banner.id = 'browser-banner';
+  banner.style.cssText = `position:fixed;top:56px;left:0;right:0;z-index:9999;
+    background:#EF4444;color:white;padding:10px 16px;text-align:center;
+    font-family:Inter,sans-serif;font-size:13px;font-weight:600;line-height:1.5;`;
+  banner.innerHTML = `GPS is blocked — open this link in Safari or Chrome instead
+    <a href="${location.href}" target="_blank"
+    style="display:block;color:white;text-decoration:underline;margin-top:2px">Tap to open in browser →</a>`;
+  document.body.appendChild(banner);
 }
 
 // ── JOIN / LEAVE ──────────────────────────────────────────────────────────────
@@ -476,7 +477,7 @@ async function startSharing(name) {
 
   watchId = navigator.geolocation.watchPosition(
     pos => pushLocation(pos.coords.latitude, pos.coords.longitude),
-    err => console.warn('GPS error:', err),
+    err => { console.warn('GPS error:', err); if (err.code === 1 || err.code === 2) showOpenInBrowserBanner(); },
     { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
   );
 
