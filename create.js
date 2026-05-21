@@ -75,7 +75,7 @@ function initMap() {
       tileSize: 512,
       maxzoom: 14,
     });
-    map.setTerrain({ source: 'mapbox-dem', exaggeration: 0 });
+    map.setTerrain({ source: 'mapbox-dem', exaggeration: 0.0001 });
 
     // Elevation overlay — colored segments drawn over route-casing
     map.addSource('route-elevation', {
@@ -235,8 +235,11 @@ function clearElevation() {
 async function updateElevationDisplay() {
   if (routeCoords.length < 2) return;
 
-  // Allow terrain tiles to load before querying
-  await new Promise(r => setTimeout(r, 1200));
+  // Wait for terrain tiles to fully load
+  await new Promise(resolve => {
+    if (map.areTilesLoaded()) return resolve();
+    map.once('idle', resolve);
+  });
 
   const step    = Math.max(1, Math.floor(routeCoords.length / 150));
   const samples = routeCoords.filter((_, i) => i % step === 0);
