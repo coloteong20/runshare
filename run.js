@@ -101,7 +101,11 @@ async function init() {
   });
 
   const savedName = sessionStorage.getItem('rs_name');
-  if (savedName) startSharing(savedName);
+  if (savedName) {
+    startSharing(savedName);
+  } else if (new URLSearchParams(location.search).get('join') === '1') {
+    map.on('load', () => showJoinModal());
+  }
 
   window.addEventListener('beforeunload', () => {
     if (isJoined) db.ref(`sessions/${sessionId}/participants/${userId}`).update({ active: false });

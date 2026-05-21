@@ -415,8 +415,7 @@ function closeModal() {
 
 function goToRun() {
   const link = document.getElementById('shareLink').value;
-  console.log('[RunShare] goToRun — link:', link);
-  if (link) location.href = link;
+  if (link) location.href = link + '&join=1';
 }
 
 // ── BOOT ──────────────────────────────────────────────────────────────────────
