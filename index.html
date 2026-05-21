@@ -42,14 +42,14 @@
         <span class="stat-value" id="waypointCount">0</span>
         <span class="stat-label">points</span>
       </div>
-      <div class="stat-block">
+      <div class="stat-block" id="climbStat">
         <span class="stat-value" id="climbVal">—</span>
         <span class="stat-label">climb</span>
       </div>
       <div class="route-actions">
         <button class="btn btn-ghost btn-sm" onclick="undoLastMarker()" title="Remove last waypoint">↩ Undo</button>
-        <button class="btn btn-ghost btn-sm" onclick="closeLoop()">↺ Loop</button>
-        <button class="btn btn-ghost btn-sm" id="elevationBtn" onclick="toggleElevation()">⛰ Elevation</button>
+        <button class="btn btn-ghost btn-sm panel-expanded-only" onclick="closeLoop()">↺ Loop</button>
+        <button class="btn btn-ghost btn-sm panel-expanded-only" id="elevationBtn" onclick="toggleElevation()">⛰ Elevation</button>
         <button class="btn btn-red btn-sm" onclick="clearRoute()">✕ Clear</button>
       </div>
     </div>

@@ -60,7 +60,10 @@ body {
   padding: 14px 16px 32px; box-shadow: 0 -4px 20px rgba(0,0,0,.1); z-index: 50;
   transition: transform .3s ease;
 }
-.bottom-panel.collapsed { transform: translateY(calc(100% - 28px)); }
+.bottom-panel.collapsed #climbStat,
+.bottom-panel.collapsed .panel-expanded-only,
+.bottom-panel.collapsed #createForm,
+.bottom-panel.collapsed .instruction { display: none !important; }
 .panel-handle {
   width: 40px; height: 4px; background: var(--border);
   border-radius: 2px; margin: 0 auto 14px; cursor: pointer;

@@ -452,4 +452,21 @@ function togglePanel() {
   document.querySelector('.bottom-panel').classList.toggle('collapsed');
 }
 
-document.addEventListener('DOMContentLoaded', initMap);
+function initPanelSwipe() {
+  const panel = document.querySelector('.bottom-panel');
+  let startY = null;
+
+  panel.addEventListener('touchstart', e => {
+    startY = e.touches[0].clientY;
+  }, { passive: true });
+
+  panel.addEventListener('touchend', e => {
+    if (startY === null) return;
+    const delta = e.changedTouches[0].clientY - startY;
+    startY = null;
+    if (delta > 40)  panel.classList.add('collapsed');
+    if (delta < -40) panel.classList.remove('collapsed');
+  }, { passive: true });
+}
+
+document.addEventListener('DOMContentLoaded', () => { initMap(); initPanelSwipe(); });

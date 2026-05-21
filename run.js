@@ -460,7 +460,6 @@ function detectPlatform() {
 }
 
 async function startSharing(name) {
-  stopPreJoinLocation();
   sessionStorage.setItem('rs_name', name);
 
   await db.ref(`sessions/${sessionId}/participants/${userId}`).update({
@@ -490,6 +489,7 @@ async function startSharing(name) {
 
 async function pushLocation(lat, lng) {
   if (!isJoined) return;
+  stopPreJoinLocation(); // swap pre-join dot for real participant marker on first GPS fix
   const now = Date.now();
 
   if (lastPushLocation) {
