@@ -39,6 +39,7 @@ let preJoinMarker      = null;
 let myRef              = null;
 let wakeLock           = null;
 let wakeWanted         = true;   // user can turn it off to save battery
+let wakeDenied         = null;   // error name when the OS refuses the lock
 
 const STALE_MS       = 30_000;
 const START_RADIUS_M = 50;
@@ -581,13 +582,17 @@ async function acquireWakeLock() {
   if (document.visibilityState !== 'visible') return;  // request would be rejected
   try {
     wakeLock = await navigator.wakeLock.request('screen');
+    wakeDenied = null;
     // The lock is dropped for us whenever the document stops being visible,
     // so this fires on every lock or app switch and we re-request on the way back.
     wakeLock.addEventListener('release', () => { wakeLock = null; renderWakeStatus(); });
   } catch (err) {
-    // Rejected by low-power mode, a missing user gesture, or an OS policy.
+    // Low Power Mode is the common one, and it turns on exactly when a long run
+    // has drained the battery — so never leave the indicator claiming the screen
+    // is held when the request was refused.
     wakeLock = null;
-    console.warn('Wake lock refused:', err.name, err.message);
+    wakeDenied = err && err.name ? err.name : 'error';
+    console.warn('Wake lock refused:', wakeDenied, err && err.message);
   }
   renderWakeStatus();
 }
@@ -601,7 +606,9 @@ async function releaseWakeLock() {
 
 function toggleWakeLock() {
   wakeWanted = !wakeWanted;
-  if (wakeWanted) acquireWakeLock(); else releaseWakeLock();
+  // A tap is a fresh user gesture, so a refusal that was only about missing one
+  // is worth retrying here.
+  if (wakeWanted) { wakeDenied = null; acquireWakeLock(); } else { releaseWakeLock(); }
   renderWakeStatus();
 }
 
@@ -622,6 +629,16 @@ function renderWakeStatus() {
     el.textContent = '☾ sleep allowed';
     el.title = 'Screen may lock. Your location pauses while it is locked. Tap to keep awake.';
     el.className = 'wake-status off';
+    return;
+  }
+  if (!wakeLock && wakeDenied) {
+    el.textContent = '⚠︎ screen may sleep';
+    el.title = wakeDenied === 'NotAllowedError'
+      ? 'The phone refused to stay awake — usually Low Power Mode. Turn it off, '
+        + 'then tap here to retry. While the screen is locked your location pauses.'
+      : 'Could not keep the screen awake (' + wakeDenied + '). Tap to retry. '
+        + 'While the screen is locked your location pauses.';
+    el.className = 'wake-status warn';
     return;
   }
   el.textContent = wakeLock ? '☀ screen stays on' : '☀ keeping awake…';
