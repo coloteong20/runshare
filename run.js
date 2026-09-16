@@ -37,6 +37,8 @@ let myBearing          = null;
 let preJoinWatchId     = null;
 let preJoinMarker      = null;
 let myRef              = null;
+let wakeLock           = null;
+let wakeWanted         = true;   // user can turn it off to save battery
 
 const STALE_MS       = 30_000;
 const START_RADIUS_M = 50;
@@ -97,6 +99,8 @@ async function init() {
   } else if (new URLSearchParams(location.search).get('join') === '1') {
     map.on('load', () => showJoinModal());
   }
+
+  document.addEventListener('visibilitychange', onVisibilityChange);
 
   // beforeunload does not reliably fire on mobile (backgrounding Safari, losing
   // signal, battery death). onDisconnect is registered with the server, so it
@@ -313,7 +317,10 @@ function renderParticipantBar(all, now) {
       const lastSeenStr = new Date(p.lastSeen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       const elapsedMins = Math.min(age / 60000, 10);
       const estM = p.pace ? Math.round(elapsedMins / p.pace * 1000) : null;
-      staleLine = `<span class="chip-stale">last seen ${lastSeenStr}${estM ? ` · est. ~${estM}m ahead` : ''}</span>`;
+      // "phone locked" and "lost signal" look identical from here unless the
+      // device managed to flag itself on the way out. Say which one it was.
+      const reason = p.paused ? 'phone locked' : 'last seen';
+      staleLine = `<span class="chip-stale">${reason} ${lastSeenStr}${estM ? ` · est. ~${estM}m ahead` : ''}</span>`;
     }
 
     const iosBadge    = p.platform === 'ios' ? '<span class="ios-badge">iOS</span>' : '';
@@ -501,6 +508,8 @@ async function startSharing(name) {
   );
 
   isJoined = true;
+  acquireWakeLock();   // called from the join tap, so we still have the gesture
+  renderWakeStatus();
   const btn = document.getElementById('joinBtn');
   btn.textContent = '📍 Sharing';
   btn.classList.add('joined');
@@ -538,13 +547,122 @@ async function pushLocation(lat, lng) {
 
 function leaveRun() {
   if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  releaseWakeLock();
   if (myRef) { myRef.onDisconnect().cancel(); myRef.update({ active: false }); }
   sessionStorage.removeItem('rs_name');
   isJoined = false;
+  renderWakeStatus();
   const btn = document.getElementById('joinBtn');
   btn.textContent = '+ Join Run';
   btn.classList.remove('joined');
   btn.onclick = showJoinModal;
+}
+
+// ── STAYING ALIVE IN THE BACKGROUND ───────────────────────────────────────────
+//
+// iOS suspends a page's JavaScript when Safari is backgrounded or the screen
+// locks. That is deliberate OS behaviour, not something a web page can opt out
+// of: watchPosition keeps its registration but no callback ever runs, so a
+// pocketed phone silently stops reporting. There is no web API that grants
+// background geolocation on iOS — not service workers, not background sync,
+// not installing to the home screen.
+//
+// So we do the three things that are actually available:
+//   1. keep the screen from locking at all, which is the whole problem;
+//   2. recover in one step the moment the page comes back;
+//   3. tell the other runners which of the two happened.
+
+function wakeLockSupported() {
+  return typeof navigator !== 'undefined' && 'wakeLock' in navigator;
+}
+
+async function acquireWakeLock() {
+  if (!wakeWanted || !wakeLockSupported() || wakeLock) return;
+  if (document.visibilityState !== 'visible') return;  // request would be rejected
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    // The lock is dropped for us whenever the document stops being visible,
+    // so this fires on every lock or app switch and we re-request on the way back.
+    wakeLock.addEventListener('release', () => { wakeLock = null; renderWakeStatus(); });
+  } catch (err) {
+    // Rejected by low-power mode, a missing user gesture, or an OS policy.
+    wakeLock = null;
+    console.warn('Wake lock refused:', err.name, err.message);
+  }
+  renderWakeStatus();
+}
+
+async function releaseWakeLock() {
+  if (!wakeLock) return;
+  try { await wakeLock.release(); } catch (_) { /* already gone */ }
+  wakeLock = null;
+  renderWakeStatus();
+}
+
+function toggleWakeLock() {
+  wakeWanted = !wakeWanted;
+  if (wakeWanted) acquireWakeLock(); else releaseWakeLock();
+  renderWakeStatus();
+}
+
+function renderWakeStatus() {
+  const el = document.getElementById('wakeStatus');
+  if (!el) return;
+  if (!isJoined) { el.style.display = 'none'; return; }
+  el.style.display = 'inline-flex';
+
+  if (!wakeLockSupported()) {
+    el.textContent = '⚠︎ screen may sleep';
+    el.title = 'This browser cannot keep the screen awake (needs iOS 16.4+). '
+             + 'Locking the phone will pause your location.';
+    el.className = 'wake-status warn';
+    return;
+  }
+  if (!wakeWanted) {
+    el.textContent = '☾ sleep allowed';
+    el.title = 'Screen may lock. Your location pauses while it is locked. Tap to keep awake.';
+    el.className = 'wake-status off';
+    return;
+  }
+  el.textContent = wakeLock ? '☀ screen stays on' : '☀ keeping awake…';
+  el.title = 'Screen is held awake so location keeps updating. Tap to allow sleeping '
+           + '(saves battery, but pauses sharing while locked).';
+  el.className = 'wake-status on';
+}
+
+// Restart the position watch. After a suspension iOS may never deliver to the
+// old registration again, so a fresh watch is cheaper than trusting the old one.
+function restartWatch() {
+  if (!isJoined || !navigator.geolocation) return;
+  if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  watchId = navigator.geolocation.watchPosition(
+    pos => pushLocation(pos.coords.latitude, pos.coords.longitude),
+    err => { console.warn('GPS error:', err); if (err.code === 1 || err.code === 2) showOpenInBrowserBanner(); },
+    { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
+  );
+}
+
+function onVisibilityChange() {
+  if (!isJoined) return;
+
+  if (document.visibilityState === 'hidden') {
+    // Best effort: the page may be frozen before this reaches the server, which
+    // is exactly why the ghost marker exists. When it does land, the other
+    // runners can say "phone locked" instead of "signal lost".
+    if (myRef) myRef.update({ paused: true, pausedAt: Date.now() });
+    return;
+  }
+
+  // Back in the foreground. Close the gap immediately rather than waiting for
+  // the watch to produce its first fix.
+  acquireWakeLock();
+  restartWatch();
+  if (myRef) myRef.update({ paused: false });
+  navigator.geolocation?.getCurrentPosition(
+    pos => pushLocation(pos.coords.latitude, pos.coords.longitude),
+    () => {},
+    { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
+  );
 }
 
 // ── COMPASS ───────────────────────────────────────────────────────────────────
@@ -665,6 +783,7 @@ function formatPace(paceMinPerKm) {
 
 function showEndedOverlay() {
   if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  releaseWakeLock();
   isJoined = false;
   sessionStorage.removeItem('rs_name');
   document.getElementById('endedOverlay').style.display = 'flex';

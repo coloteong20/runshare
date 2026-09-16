@@ -19,6 +19,8 @@
     <div class="run-info">
       <div class="run-title" id="sessionTitle">Loading…</div>
       <div class="run-meta" id="sessionMeta"></div>
+      <button type="button" id="wakeStatus" class="wake-status" style="display:none"
+              onclick="toggleWakeLock()"></button>
     </div>
     <button id="joinBtn" onclick="showJoinModal()">+ Join Run</button>
     <button id="endRunBtn" onclick="endRun()" style="display:none;background:var(--red);color:white;border:none;border-radius:var(--r-sm);padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">End Run</button>
