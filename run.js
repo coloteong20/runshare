@@ -10,7 +10,7 @@ const COLORS = [
 ];
 
 let userId = sessionStorage.getItem('rs_uid') || (() => {
-  const id = Math.random().toString(36).slice(2, 11);
+  const id = randomId();
   sessionStorage.setItem('rs_uid', id);
   return id;
 })();
@@ -36,6 +36,10 @@ let myMarkerEl         = null;
 let myBearing          = null;
 let preJoinWatchId     = null;
 let preJoinMarker      = null;
+let myRef              = null;
+let wakeLock           = null;
+let wakeWanted         = true;   // user can turn it off to save battery
+let wakeDenied         = null;   // error name when the OS refuses the lock
 
 const STALE_MS       = 30_000;
 const START_RADIUS_M = 50;
@@ -97,8 +101,13 @@ async function init() {
     map.on('load', () => showJoinModal());
   }
 
-  window.addEventListener('beforeunload', () => {
-    if (isJoined) db.ref(`sessions/${sessionId}/participants/${userId}`).update({ active: false });
+  document.addEventListener('visibilitychange', onVisibilityChange);
+
+  // beforeunload does not reliably fire on mobile (backgrounding Safari, losing
+  // signal, battery death). onDisconnect is registered with the server, so it
+  // still marks the runner inactive when the connection simply disappears.
+  window.addEventListener('pagehide', () => {
+    if (isJoined && myRef) myRef.update({ active: false });
   });
 }
 
@@ -156,7 +165,9 @@ function onParticipantsSnapshot(snapshot) {
   });
 
   Object.entries(all).forEach(([id, p]) => {
-    if (!p.lat || !p.lng) return;
+    // lat/lng of exactly 0 are valid coordinates (equator / prime meridian),
+    // so a truthiness check would silently drop those runners.
+    if (typeof p.lat !== 'number' || typeof p.lng !== 'number') return;
     const isMe  = id === userId;
     const age   = now - (p.lastSeen || 0);
     const active = age < 120_000;
@@ -180,7 +191,6 @@ function onParticipantsSnapshot(snapshot) {
         .addTo(map);
       participantMarkers[id] = marker;
     }
-    participantMarkers[id].getElement().style.opacity = opacity;
 
     // Ghost marker for stale-but-recent participants with known pace
     if (stale && active && p.pace) {
@@ -286,8 +296,9 @@ function renderParticipantBar(all, now) {
     const color  = participantColors[id] || '#999';
     const isMe   = id === userId;
 
-    const remaining  = (active && p.lat && p.lng) ? getRemainingDistance(p.lat, p.lng) : null;
-    const notStarted = (active && p.lat && p.lng && routeCoords.length > 0)
+    const hasFix     = typeof p.lat === 'number' && typeof p.lng === 'number';
+    const remaining  = (active && hasFix) ? getRemainingDistance(p.lat, p.lng) : null;
+    const notStarted = (active && hasFix && routeCoords.length > 0)
       ? haversineKm(p.lat, p.lng, routeCoords[0][1], routeCoords[0][0]) * 1000 < START_RADIUS_M
       : false;
     const etaStr  = notStarted ? null : formatETA(remaining, p.pace ?? null);
@@ -307,7 +318,10 @@ function renderParticipantBar(all, now) {
       const lastSeenStr = new Date(p.lastSeen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       const elapsedMins = Math.min(age / 60000, 10);
       const estM = p.pace ? Math.round(elapsedMins / p.pace * 1000) : null;
-      staleLine = `<span class="chip-stale">last seen ${lastSeenStr}${estM ? ` · est. ~${estM}m ahead` : ''}</span>`;
+      // "phone locked" and "lost signal" look identical from here unless the
+      // device managed to flag itself on the way out. Say which one it was.
+      const reason = p.paused ? 'phone locked' : 'last seen';
+      staleLine = `<span class="chip-stale">${reason} ${lastSeenStr}${estM ? ` · est. ~${estM}m ahead` : ''}</span>`;
     }
 
     const iosBadge    = p.platform === 'ios' ? '<span class="ios-badge">iOS</span>' : '';
@@ -315,10 +329,10 @@ function renderParticipantBar(all, now) {
 
     return `
       <div class="participant-chip ${active ? '' : 'inactive'} ${trailActive ? 'trail-on' : ''}"
-           onclick="toggleTrail('${id}')" title="Tap to show/hide trail">
+           onclick="toggleTrail('${escapeHtml(id)}')" title="Tap to show/hide trail">
         <div class="chip-dot" style="background:${color}"></div>
         <div class="chip-info">
-          <span class="chip-name">${p.name}${isMe ? ' (You)' : ''}${iosBadge}</span>
+          <span class="chip-name">${escapeHtml(p.name)}${isMe ? ' (You)' : ''}${iosBadge}</span>
           ${metaParts.length ? `<span class="chip-meta">${metaParts.join(' · ')}</span>` : ''}
           ${staleLine}
         </div>
@@ -473,7 +487,10 @@ function detectPlatform() {
 async function startSharing(name) {
   sessionStorage.setItem('rs_name', name);
 
-  await db.ref(`sessions/${sessionId}/participants/${userId}`).update({
+  myRef = db.ref(`sessions/${sessionId}/participants/${userId}`);
+  myRef.onDisconnect().update({ active: false });
+
+  await myRef.update({
     name,
     platform: detectPlatform(),
     lat:      null,
@@ -492,6 +509,8 @@ async function startSharing(name) {
   );
 
   isJoined = true;
+  acquireWakeLock();   // called from the join tap, so we still have the gesture
+  renderWakeStatus();
   const btn = document.getElementById('joinBtn');
   btn.textContent = '📍 Sharing';
   btn.classList.add('joined');
@@ -529,13 +548,138 @@ async function pushLocation(lat, lng) {
 
 function leaveRun() {
   if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
-  db.ref(`sessions/${sessionId}/participants/${userId}`).update({ active: false });
+  releaseWakeLock();
+  if (myRef) { myRef.onDisconnect().cancel(); myRef.update({ active: false }); }
   sessionStorage.removeItem('rs_name');
   isJoined = false;
+  renderWakeStatus();
   const btn = document.getElementById('joinBtn');
   btn.textContent = '+ Join Run';
   btn.classList.remove('joined');
   btn.onclick = showJoinModal;
+}
+
+// ── STAYING ALIVE IN THE BACKGROUND ───────────────────────────────────────────
+//
+// iOS suspends a page's JavaScript when Safari is backgrounded or the screen
+// locks. That is deliberate OS behaviour, not something a web page can opt out
+// of: watchPosition keeps its registration but no callback ever runs, so a
+// pocketed phone silently stops reporting. There is no web API that grants
+// background geolocation on iOS — not service workers, not background sync,
+// not installing to the home screen.
+//
+// So we do the three things that are actually available:
+//   1. keep the screen from locking at all, which is the whole problem;
+//   2. recover in one step the moment the page comes back;
+//   3. tell the other runners which of the two happened.
+
+function wakeLockSupported() {
+  return typeof navigator !== 'undefined' && 'wakeLock' in navigator;
+}
+
+async function acquireWakeLock() {
+  if (!wakeWanted || !wakeLockSupported() || wakeLock) return;
+  if (document.visibilityState !== 'visible') return;  // request would be rejected
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeDenied = null;
+    // The lock is dropped for us whenever the document stops being visible,
+    // so this fires on every lock or app switch and we re-request on the way back.
+    wakeLock.addEventListener('release', () => { wakeLock = null; renderWakeStatus(); });
+  } catch (err) {
+    // Low Power Mode is the common one, and it turns on exactly when a long run
+    // has drained the battery — so never leave the indicator claiming the screen
+    // is held when the request was refused.
+    wakeLock = null;
+    wakeDenied = err && err.name ? err.name : 'error';
+    console.warn('Wake lock refused:', wakeDenied, err && err.message);
+  }
+  renderWakeStatus();
+}
+
+async function releaseWakeLock() {
+  if (!wakeLock) return;
+  try { await wakeLock.release(); } catch (_) { /* already gone */ }
+  wakeLock = null;
+  renderWakeStatus();
+}
+
+function toggleWakeLock() {
+  wakeWanted = !wakeWanted;
+  // A tap is a fresh user gesture, so a refusal that was only about missing one
+  // is worth retrying here.
+  if (wakeWanted) { wakeDenied = null; acquireWakeLock(); } else { releaseWakeLock(); }
+  renderWakeStatus();
+}
+
+function renderWakeStatus() {
+  const el = document.getElementById('wakeStatus');
+  if (!el) return;
+  if (!isJoined) { el.style.display = 'none'; return; }
+  el.style.display = 'inline-flex';
+
+  if (!wakeLockSupported()) {
+    el.textContent = '⚠︎ screen may sleep';
+    el.title = 'This browser cannot keep the screen awake (needs iOS 16.4+). '
+             + 'Locking the phone will pause your location.';
+    el.className = 'wake-status warn';
+    return;
+  }
+  if (!wakeWanted) {
+    el.textContent = '☾ sleep allowed';
+    el.title = 'Screen may lock. Your location pauses while it is locked. Tap to keep awake.';
+    el.className = 'wake-status off';
+    return;
+  }
+  if (!wakeLock && wakeDenied) {
+    el.textContent = '⚠︎ screen may sleep';
+    el.title = wakeDenied === 'NotAllowedError'
+      ? 'The phone refused to stay awake — usually Low Power Mode. Turn it off, '
+        + 'then tap here to retry. While the screen is locked your location pauses.'
+      : 'Could not keep the screen awake (' + wakeDenied + '). Tap to retry. '
+        + 'While the screen is locked your location pauses.';
+    el.className = 'wake-status warn';
+    return;
+  }
+  el.textContent = wakeLock ? '☀ screen stays on' : '☀ keeping awake…';
+  el.title = 'Screen is held awake so location keeps updating. Tap to allow sleeping '
+           + '(saves battery, but pauses sharing while locked).';
+  el.className = 'wake-status on';
+}
+
+// Restart the position watch. After a suspension iOS may never deliver to the
+// old registration again, so a fresh watch is cheaper than trusting the old one.
+function restartWatch() {
+  if (!isJoined || !navigator.geolocation) return;
+  if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  watchId = navigator.geolocation.watchPosition(
+    pos => pushLocation(pos.coords.latitude, pos.coords.longitude),
+    err => { console.warn('GPS error:', err); if (err.code === 1 || err.code === 2) showOpenInBrowserBanner(); },
+    { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
+  );
+}
+
+function onVisibilityChange() {
+  if (!isJoined) return;
+
+  if (document.visibilityState === 'hidden') {
+    // Best effort: the page may be frozen before this reaches the server, which
+    // is exactly why the ghost marker exists. When it does land, the other
+    // runners can say "phone locked" instead of "signal lost".
+    if (myRef) myRef.update({ paused: true, pausedAt: Date.now() });
+    return;
+  }
+
+  // Back in the foreground. Close the gap immediately rather than waiting for
+  // the watch to produce its first fix.
+  acquireWakeLock();
+  restartWatch();
+  if (myRef) myRef.update({ paused: false });
+  navigator.geolocation?.getCurrentPosition(
+    pos => pushLocation(pos.coords.latitude, pos.coords.longitude),
+    () => {},
+    { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
+  );
 }
 
 // ── COMPASS ───────────────────────────────────────────────────────────────────
@@ -586,28 +730,34 @@ function makeGhostEl(color) {
 
 // ── MATH HELPERS ─────────────────────────────────────────────────────────────
 
-function haversineKm(lat1, lng1, lat2, lng2) {
-  const R = 6371;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLng = (lng2 - lng1) * Math.PI / 180;
-  const a = Math.sin(dLat/2)**2 +
-    Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLng/2)**2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-}
-
-function getRemainingDistance(lat, lng) {
+// Both callers below need "where on the route is this runner?". It was copy-pasted,
+// and both copies compared lng/lat degrees with Math.hypot as if the earth were a
+// flat square grid. A degree of longitude is only cos(lat) as long as a degree of
+// latitude, so the nearest-segment search picked the wrong segment away from the
+// equator — invisible in Singapore (cos≈1.00), wrong by 1.6x in London.
+function nearestPointOnRoute(lat, lng) {
   if (routeCoords.length < 2) return null;
+  const k = lngScale(lat);
   let minDist = Infinity, bestIdx = 0, bestT = 0;
   for (let i = 0; i < routeCoords.length - 1; i++) {
     const [x1, y1] = routeCoords[i], [x2, y2] = routeCoords[i + 1];
-    const dx = x2 - x1, dy = y2 - y1, lenSq = dx*dx + dy*dy;
-    const t = lenSq > 0 ? Math.max(0, Math.min(1, ((lng-x1)*dx + (lat-y1)*dy) / lenSq)) : 0;
-    const d = Math.hypot(lng - (x1+t*dx), lat - (y1+t*dy));
+    const dx = (x2 - x1) * k, dy = y2 - y1, lenSq = dx*dx + dy*dy;
+    const t = lenSq > 0
+      ? Math.max(0, Math.min(1, ((lng - x1) * k * dx + (lat - y1) * dy) / lenSq))
+      : 0;
+    const d = Math.hypot((lng - x1) * k - t * dx, (lat - y1) - t * dy);
     if (d < minDist) { minDist = d; bestIdx = i; bestT = t; }
   }
   const [x1, y1] = routeCoords[bestIdx], [x2, y2] = routeCoords[bestIdx + 1];
-  let remaining = haversineKm(y1 + bestT*(y2-y1), x1 + bestT*(x2-x1), y2, x2);
-  for (let i = bestIdx + 1; i < routeCoords.length - 1; i++) {
+  return { bestIdx, lat: y1 + bestT * (y2 - y1), lng: x1 + bestT * (x2 - x1) };
+}
+
+function getRemainingDistance(lat, lng) {
+  const np = nearestPointOnRoute(lat, lng);
+  if (!np) return null;
+  const [x2, y2] = routeCoords[np.bestIdx + 1];
+  let remaining = haversineKm(np.lat, np.lng, y2, x2);
+  for (let i = np.bestIdx + 1; i < routeCoords.length - 1; i++) {
     const [ax, ay] = routeCoords[i], [bx, by] = routeCoords[i+1];
     remaining += haversineKm(ay, ax, by, bx);
   }
@@ -615,18 +765,12 @@ function getRemainingDistance(lat, lng) {
 }
 
 function walkForwardOnRoute(lat, lng, distanceKm) {
-  if (routeCoords.length < 2 || distanceKm <= 0) return null;
-  let minDist = Infinity, bestIdx = 0, bestT = 0;
-  for (let i = 0; i < routeCoords.length - 1; i++) {
-    const [x1, y1] = routeCoords[i], [x2, y2] = routeCoords[i + 1];
-    const dx = x2 - x1, dy = y2 - y1, lenSq = dx*dx + dy*dy;
-    const t = lenSq > 0 ? Math.max(0, Math.min(1, ((lng-x1)*dx + (lat-y1)*dy) / lenSq)) : 0;
-    const d = Math.hypot(lng - (x1+t*dx), lat - (y1+t*dy));
-    if (d < minDist) { minDist = d; bestIdx = i; bestT = t; }
-  }
-  const [x1, y1] = routeCoords[bestIdx], [x2, y2] = routeCoords[bestIdx + 1];
-  let curLat = y1 + bestT*(y2-y1), curLng = x1 + bestT*(x2-x1);
+  if (distanceKm <= 0) return null;
+  const np = nearestPointOnRoute(lat, lng);
+  if (!np) return null;
+  let curLat = np.lat, curLng = np.lng;
   let left = distanceKm;
+  const bestIdx = np.bestIdx;
   for (let i = bestIdx; i < routeCoords.length - 1; i++) {
     const [nx, ny] = routeCoords[i + 1];
     const segDist = haversineKm(curLat, curLng, ny, nx);
@@ -656,6 +800,7 @@ function formatPace(paceMinPerKm) {
 
 function showEndedOverlay() {
   if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  releaseWakeLock();
   isJoined = false;
   sessionStorage.removeItem('rs_name');
   document.getElementById('endedOverlay').style.display = 'flex';
@@ -679,7 +824,7 @@ function showError(msg) {
       font-family:Inter,sans-serif;gap:16px;">
       <div style="font-size:48px">⚠️</div>
       <h2>Session Not Found</h2>
-      <p style="color:#6B7280;max-width:280px">${msg}</p>
+      <p style="color:#6B7280;max-width:280px">${escapeHtml(msg)}</p>
       <a href="index.html" style="background:#FF6B35;color:white;
         padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;">
         Create New Run

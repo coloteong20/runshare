@@ -1,0 +1,105 @@
+// RunShare — proposed Realtime Database rules.
+//
+// NOT DEPLOYED YET. These are deliberately left out of firebase.json so that a
+// routine `firebase deploy` cannot apply them untested. To adopt them:
+//
+//   1. Paste into the Rules Playground (Firebase console → Realtime Database →
+//      Rules) and simulate: an anonymous read of /secrets, a participant write
+//      with and without a matching proof, and a write of a 200-char name.
+//   2. Add  "database": { "rules": "database.rules.json" }  to firebase.json
+//   3. firebase deploy --only database
+//
+// They also require the client change described in the "Password" note below.
+// Until that lands, deploying these WILL break password-protected runs.
+{
+  "rules": {
+
+    // ── Public run data ──────────────────────────────────────────────────────
+    // Readable by anyone holding the link. The link is the capability, which is
+    // why session ids must be crypto-random (see randomId() in util.js).
+    "sessions": {
+      "$sid": {
+        ".read": true,
+
+        // Create once. Afterwards only the specific children below may change,
+        // so a passer-by cannot rewrite or delete someone's route mid-run.
+        ".write": "!data.exists()",
+        ".validate": "newData.hasChildren(['name', 'route', 'creatorId', 'createdAt'])",
+
+        "name":       { ".validate": "newData.isString() && newData.val().length <= 60" },
+        "createdAt":  { ".validate": "newData.isNumber()" },
+        "distanceKm": { ".validate": "newData.isNumber() && newData.val() >= 0" },
+
+        // A plaintext password must never be stored under a readable path again.
+        "password":   { ".validate": false },
+
+        "ended":      { ".write": true, ".validate": "newData.isBoolean()" },
+        "endedAt":    { ".write": true, ".validate": "newData.isNumber()" },
+
+        "participants": {
+          "$uid": {
+            // Open run → anyone may join. Protected run → the writer must have
+            // already deposited a proof that matches the stored hash. The hash
+            // itself is never readable, so the proof cannot be harvested.
+            ".write": "root.child('secrets/' + $sid + '/hash').val() === null || root.child('proofs/' + $sid + '/' + $uid).val() === root.child('secrets/' + $sid + '/hash').val()",
+            ".validate": "newData.hasChildren(['name', 'lastSeen'])",
+
+            "name":     { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 30" },
+            "lat":      { ".validate": "newData.isNumber() && newData.val() >= -90  && newData.val() <= 90" },
+            "lng":      { ".validate": "newData.isNumber() && newData.val() >= -180 && newData.val() <= 180" },
+            "lastSeen": { ".validate": "newData.isNumber()" },
+            "joinedAt": { ".validate": "newData.isNumber()" },
+            "active":   { ".validate": "newData.isBoolean()" },
+            "pace":     { ".validate": "newData.isNumber() && newData.val() > 0 && newData.val() < 60" },
+            "platform": { ".validate": "newData.isString() && newData.val().length <= 16" },
+            "$other":   { ".validate": false }
+          }
+        },
+
+        "trails": {
+          "$uid": {
+            ".write": "root.child('secrets/' + $sid + '/hash').val() === null || root.child('proofs/' + $sid + '/' + $uid).val() === root.child('secrets/' + $sid + '/hash').val()",
+            "$point": {
+              "lat":    { ".validate": "newData.isNumber() && newData.val() >= -90  && newData.val() <= 90" },
+              "lng":    { ".validate": "newData.isNumber() && newData.val() >= -180 && newData.val() <= 180" },
+              "$other": { ".validate": false }
+            }
+          }
+        },
+
+        "$other": { ".validate": true }
+      }
+    },
+
+    // ── Password ─────────────────────────────────────────────────────────────
+    // Write-only by design: the client stores sha256(password) here at creation
+    // and can never read it back. Security rules run on the server and CAN read
+    // it, which is what makes server-side enforcement possible at all.
+    "secrets": {
+      "$sid": {
+        ".read": false,
+        ".write": "!data.exists()",
+        "hash": { ".validate": "newData.isString() && newData.val().length === 64" }
+      }
+    },
+
+    // A joiner deposits sha256(entered password) here, then writes its
+    // participant node. Never readable, so one member cannot lift another
+    // member's proof and replay it.
+    "proofs": {
+      "$sid": {
+        "$uid": {
+          ".read": false,
+          ".write": true,
+          ".validate": "newData.isString() && newData.val().length === 64"
+        }
+      }
+    }
+  }
+}
+
+// KNOWN LIMIT: $uid is a value the client picks, so these rules still cannot stop
+// one member of a run from overwriting another member's position. Closing that
+// needs Firebase Anonymous Auth (signInAnonymously(), no UI, free) and then
+// ".write": "auth != null && auth.uid === $uid". Worth doing before this is
+// shared beyond people you know.
