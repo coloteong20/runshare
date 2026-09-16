@@ -47,6 +47,32 @@ RunShare solves a simple problem: when you run with friends at different speeds,
 4. Deploy: `firebase deploy`
 
 > `config.js` is gitignored — never commit your keys.
+> Note that the Firebase web config is *not* a secret: it ships to every browser
+> that loads the app. What actually protects your data is the database rules.
+
+## Tests
+
+```
+node --test test/
+```
+
+No dependencies — uses the test runner built into Node 18+. The geometry tests
+cover route-snapping away from the equator, which is the case the original
+flat-degree maths got wrong.
+
+## Database rules
+
+`database.rules.json` holds a proposed hardened ruleset. It is **not** wired into
+`firebase.json`, so it does not deploy by accident — read the header comment in
+that file before adopting it.
+
+Two things to know about the current deployed setup:
+
+- **The run password is not enforced.** `run.js` downloads the session, password
+  included, and compares it in the browser. Anyone who opens the link can read it
+  from the network tab. Fixing this properly is what `database.rules.json` is for.
+- **The link is the real secret.** Anyone with a run URL can see everyone's live
+  position, so session ids are generated with `crypto.getRandomValues`.
 
 ---
 

@@ -10,7 +10,7 @@ const COLORS = [
 ];
 
 let userId = sessionStorage.getItem('rs_uid') || (() => {
-  const id = Math.random().toString(36).slice(2, 11);
+  const id = randomId();
   sessionStorage.setItem('rs_uid', id);
   return id;
 })();
@@ -36,6 +36,7 @@ let myMarkerEl         = null;
 let myBearing          = null;
 let preJoinWatchId     = null;
 let preJoinMarker      = null;
+let myRef              = null;
 
 const STALE_MS       = 30_000;
 const START_RADIUS_M = 50;
@@ -97,8 +98,11 @@ async function init() {
     map.on('load', () => showJoinModal());
   }
 
-  window.addEventListener('beforeunload', () => {
-    if (isJoined) db.ref(`sessions/${sessionId}/participants/${userId}`).update({ active: false });
+  // beforeunload does not reliably fire on mobile (backgrounding Safari, losing
+  // signal, battery death). onDisconnect is registered with the server, so it
+  // still marks the runner inactive when the connection simply disappears.
+  window.addEventListener('pagehide', () => {
+    if (isJoined && myRef) myRef.update({ active: false });
   });
 }
 
@@ -156,7 +160,9 @@ function onParticipantsSnapshot(snapshot) {
   });
 
   Object.entries(all).forEach(([id, p]) => {
-    if (!p.lat || !p.lng) return;
+    // lat/lng of exactly 0 are valid coordinates (equator / prime meridian),
+    // so a truthiness check would silently drop those runners.
+    if (typeof p.lat !== 'number' || typeof p.lng !== 'number') return;
     const isMe  = id === userId;
     const age   = now - (p.lastSeen || 0);
     const active = age < 120_000;
@@ -180,7 +186,6 @@ function onParticipantsSnapshot(snapshot) {
         .addTo(map);
       participantMarkers[id] = marker;
     }
-    participantMarkers[id].getElement().style.opacity = opacity;
 
     // Ghost marker for stale-but-recent participants with known pace
     if (stale && active && p.pace) {
@@ -286,8 +291,9 @@ function renderParticipantBar(all, now) {
     const color  = participantColors[id] || '#999';
     const isMe   = id === userId;
 
-    const remaining  = (active && p.lat && p.lng) ? getRemainingDistance(p.lat, p.lng) : null;
-    const notStarted = (active && p.lat && p.lng && routeCoords.length > 0)
+    const hasFix     = typeof p.lat === 'number' && typeof p.lng === 'number';
+    const remaining  = (active && hasFix) ? getRemainingDistance(p.lat, p.lng) : null;
+    const notStarted = (active && hasFix && routeCoords.length > 0)
       ? haversineKm(p.lat, p.lng, routeCoords[0][1], routeCoords[0][0]) * 1000 < START_RADIUS_M
       : false;
     const etaStr  = notStarted ? null : formatETA(remaining, p.pace ?? null);
@@ -315,10 +321,10 @@ function renderParticipantBar(all, now) {
 
     return `
       <div class="participant-chip ${active ? '' : 'inactive'} ${trailActive ? 'trail-on' : ''}"
-           onclick="toggleTrail('${id}')" title="Tap to show/hide trail">
+           onclick="toggleTrail('${escapeHtml(id)}')" title="Tap to show/hide trail">
         <div class="chip-dot" style="background:${color}"></div>
         <div class="chip-info">
-          <span class="chip-name">${p.name}${isMe ? ' (You)' : ''}${iosBadge}</span>
+          <span class="chip-name">${escapeHtml(p.name)}${isMe ? ' (You)' : ''}${iosBadge}</span>
           ${metaParts.length ? `<span class="chip-meta">${metaParts.join(' · ')}</span>` : ''}
           ${staleLine}
         </div>
@@ -473,7 +479,10 @@ function detectPlatform() {
 async function startSharing(name) {
   sessionStorage.setItem('rs_name', name);
 
-  await db.ref(`sessions/${sessionId}/participants/${userId}`).update({
+  myRef = db.ref(`sessions/${sessionId}/participants/${userId}`);
+  myRef.onDisconnect().update({ active: false });
+
+  await myRef.update({
     name,
     platform: detectPlatform(),
     lat:      null,
@@ -529,7 +538,7 @@ async function pushLocation(lat, lng) {
 
 function leaveRun() {
   if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
-  db.ref(`sessions/${sessionId}/participants/${userId}`).update({ active: false });
+  if (myRef) { myRef.onDisconnect().cancel(); myRef.update({ active: false }); }
   sessionStorage.removeItem('rs_name');
   isJoined = false;
   const btn = document.getElementById('joinBtn');
@@ -586,28 +595,34 @@ function makeGhostEl(color) {
 
 // ── MATH HELPERS ─────────────────────────────────────────────────────────────
 
-function haversineKm(lat1, lng1, lat2, lng2) {
-  const R = 6371;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLng = (lng2 - lng1) * Math.PI / 180;
-  const a = Math.sin(dLat/2)**2 +
-    Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLng/2)**2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-}
-
-function getRemainingDistance(lat, lng) {
+// Both callers below need "where on the route is this runner?". It was copy-pasted,
+// and both copies compared lng/lat degrees with Math.hypot as if the earth were a
+// flat square grid. A degree of longitude is only cos(lat) as long as a degree of
+// latitude, so the nearest-segment search picked the wrong segment away from the
+// equator — invisible in Singapore (cos≈1.00), wrong by 1.6x in London.
+function nearestPointOnRoute(lat, lng) {
   if (routeCoords.length < 2) return null;
+  const k = lngScale(lat);
   let minDist = Infinity, bestIdx = 0, bestT = 0;
   for (let i = 0; i < routeCoords.length - 1; i++) {
     const [x1, y1] = routeCoords[i], [x2, y2] = routeCoords[i + 1];
-    const dx = x2 - x1, dy = y2 - y1, lenSq = dx*dx + dy*dy;
-    const t = lenSq > 0 ? Math.max(0, Math.min(1, ((lng-x1)*dx + (lat-y1)*dy) / lenSq)) : 0;
-    const d = Math.hypot(lng - (x1+t*dx), lat - (y1+t*dy));
+    const dx = (x2 - x1) * k, dy = y2 - y1, lenSq = dx*dx + dy*dy;
+    const t = lenSq > 0
+      ? Math.max(0, Math.min(1, ((lng - x1) * k * dx + (lat - y1) * dy) / lenSq))
+      : 0;
+    const d = Math.hypot((lng - x1) * k - t * dx, (lat - y1) - t * dy);
     if (d < minDist) { minDist = d; bestIdx = i; bestT = t; }
   }
   const [x1, y1] = routeCoords[bestIdx], [x2, y2] = routeCoords[bestIdx + 1];
-  let remaining = haversineKm(y1 + bestT*(y2-y1), x1 + bestT*(x2-x1), y2, x2);
-  for (let i = bestIdx + 1; i < routeCoords.length - 1; i++) {
+  return { bestIdx, lat: y1 + bestT * (y2 - y1), lng: x1 + bestT * (x2 - x1) };
+}
+
+function getRemainingDistance(lat, lng) {
+  const np = nearestPointOnRoute(lat, lng);
+  if (!np) return null;
+  const [x2, y2] = routeCoords[np.bestIdx + 1];
+  let remaining = haversineKm(np.lat, np.lng, y2, x2);
+  for (let i = np.bestIdx + 1; i < routeCoords.length - 1; i++) {
     const [ax, ay] = routeCoords[i], [bx, by] = routeCoords[i+1];
     remaining += haversineKm(ay, ax, by, bx);
   }
@@ -615,18 +630,12 @@ function getRemainingDistance(lat, lng) {
 }
 
 function walkForwardOnRoute(lat, lng, distanceKm) {
-  if (routeCoords.length < 2 || distanceKm <= 0) return null;
-  let minDist = Infinity, bestIdx = 0, bestT = 0;
-  for (let i = 0; i < routeCoords.length - 1; i++) {
-    const [x1, y1] = routeCoords[i], [x2, y2] = routeCoords[i + 1];
-    const dx = x2 - x1, dy = y2 - y1, lenSq = dx*dx + dy*dy;
-    const t = lenSq > 0 ? Math.max(0, Math.min(1, ((lng-x1)*dx + (lat-y1)*dy) / lenSq)) : 0;
-    const d = Math.hypot(lng - (x1+t*dx), lat - (y1+t*dy));
-    if (d < minDist) { minDist = d; bestIdx = i; bestT = t; }
-  }
-  const [x1, y1] = routeCoords[bestIdx], [x2, y2] = routeCoords[bestIdx + 1];
-  let curLat = y1 + bestT*(y2-y1), curLng = x1 + bestT*(x2-x1);
+  if (distanceKm <= 0) return null;
+  const np = nearestPointOnRoute(lat, lng);
+  if (!np) return null;
+  let curLat = np.lat, curLng = np.lng;
   let left = distanceKm;
+  const bestIdx = np.bestIdx;
   for (let i = bestIdx; i < routeCoords.length - 1; i++) {
     const [nx, ny] = routeCoords[i + 1];
     const segDist = haversineKm(curLat, curLng, ny, nx);
@@ -679,7 +688,7 @@ function showError(msg) {
       font-family:Inter,sans-serif;gap:16px;">
       <div style="font-size:48px">⚠️</div>
       <h2>Session Not Found</h2>
-      <p style="color:#6B7280;max-width:280px">${msg}</p>
+      <p style="color:#6B7280;max-width:280px">${escapeHtml(msg)}</p>
       <a href="index.html" style="background:#FF6B35;color:white;
         padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;">
         Create New Run

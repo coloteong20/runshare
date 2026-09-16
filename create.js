@@ -5,7 +5,7 @@ firebase.initializeApp(FIREBASE_CONFIG);
 const db = firebase.database();
 
 const creatorId = sessionStorage.getItem('rs_uid') || (() => {
-  const id = Math.random().toString(36).slice(2, 11);
+  const id = randomId();
   sessionStorage.setItem('rs_uid', id);
   return id;
 })();
@@ -187,7 +187,9 @@ async function closeLoop() {
   waypoints.push([...waypoints[0]]);
 
   const el = makeWaypointEl('end');
-  new mapboxgl.Marker({ element: el }).setLngLat(waypoints[0]).addTo(map);
+  // Must go into markers[] too — otherwise undo/clear leave it orphaned on the map
+  // and markers[] falls out of step with waypoints[], corrupting drag handling.
+  markers.push(new mapboxgl.Marker({ element: el }).setLngLat(waypoints[0]).addTo(map));
 
   await refreshRoute();
   updatePanel();
@@ -279,15 +281,6 @@ function slopeColor(slope) {
   return '#3B82F6';                 // downhill
 }
 
-function haversineKm(lat1, lng1, lat2, lng2) {
-  const R = 6371;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLng = (lng2 - lng1) * Math.PI / 180;
-  const a = Math.sin(dLat/2)**2 +
-    Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLng/2)**2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-}
-
 // ── PANEL UI ──────────────────────────────────────────────────────────────────
 
 function updatePanel() {
@@ -328,7 +321,7 @@ async function createSession() {
   btn.textContent = 'Creating…';
   btn.disabled    = true;
 
-  const id = Math.random().toString(36).slice(2, 11);
+  const id = randomId();
 
   const password = document.getElementById('sessionPassword').value.trim();
   const payload = {
@@ -380,8 +373,8 @@ function renderHistory() {
     return;
   }
   list.innerHTML = h.map(s => `
-    <div class="history-item" onclick="location.href='run.html?s=${s.id}'">
-      <div class="history-item-name">${s.name}</div>
+    <div class="history-item" onclick="location.href='run.html?s=${encodeURIComponent(s.id)}'">
+      <div class="history-item-name">${escapeHtml(s.name)}</div>
       <div class="history-item-meta">${s.distanceKm.toFixed(1)} km &middot; ${new Date(s.createdAt).toLocaleDateString()}</div>
     </div>
   `).join('');
@@ -430,9 +423,7 @@ function straightLineDistance(points) {
   let dist = 0;
   for (let i = 1; i < points.length; i++) {
     const [lng1, lat1] = points[i - 1], [lng2, lat2] = points[i];
-    const R = 6371, dLat = (lat2 - lat1) * Math.PI / 180, dLng = (lng2 - lng1) * Math.PI / 180;
-    const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLng/2)**2;
-    dist += R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    dist += haversineKm(lat1, lng1, lat2, lng2);
   }
   return dist;
 }
